@@ -23,17 +23,17 @@ jobs:
           install_args: rust dart
       - name: Show tool versions
         run: |
-          mise exec -- dart --version
-          mise exec -- rustc --version
-          mise exec -- ./target/debug/oche sdk-info || true
+          mise exec rust dart -- dart --version
+          mise exec rust dart -- rustc --version
+          mise exec rust dart -- ./target/debug/oche sdk-info || true
       - name: Build
-        run: mise exec -- cargo build --workspace --all-targets
+        run: mise exec rust dart -- cargo build --workspace --all-targets
       - name: Format
-        run: mise exec -- cargo fmt --check
+        run: mise exec rust dart -- cargo fmt --check
       - name: Clippy
-        run: mise exec -- cargo clippy --workspace --all-targets -- -D warnings
+        run: mise exec rust dart -- cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: mise exec -- cargo test --workspace
+        run: mise exec rust dart -- cargo test --workspace
       - name: Check examples
         run: |
-          mise exec -- ./target/debug/oche check examples/generated_expressions.oche
+          mise exec rust dart -- ./target/debug/oche check examples/generated_expressions.oche
