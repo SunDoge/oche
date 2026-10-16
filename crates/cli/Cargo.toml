@@ -1,0 +1,21 @@
+[package]
+name = "oche"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+snafu.workspace = true
+serde_json.workspace = true
+usage-rs.workspace = true
+ariadne.workspace = true
+oche-codegen = { path = "../codegen" }
+oche-comptime = { path = "../comptime" }
+oche-frontend = { path = "../frontend" }
+oche-formatter = { path = "../formatter" }
+oche-hir = { path = "../hir" }
+oche-lsp = { path = "../lsp" }
+oche-interop = { path = "../interop" }
+
+[dev-dependencies]
+usage-rs = { workspace = true, features = ["test"] }

@@ -1,0 +1,51 @@
+import "std/json" as json
+
+struct User {
+  name: String,
+  age: Int,
+  active: Bool,
+}
+
+fn encode_user(name: String, age: Int, active: Bool) -> String {
+  json.encode(type User, User { name: name, age: age, active: active })
+}
+
+fn round_trip(source: String) -> String {
+  match json.decode(type User, source) {
+    Ok(user) => json.encode(type User, user),
+    Err(error) => error,
+  }
+}
+
+fn through_value(source: String) -> String {
+  match json.decode(type User, source) {
+    Ok(user) => match json.fromValue(type User, json.toValue(type User, user)) {
+      Ok(decoded) => json.encode(type User, decoded),
+      Err(error) => error,
+    },
+    Err(error) => error,
+  }
+}
+
+fn dynamic_round_trip(source: String) -> String {
+  match json.decode(type JsonValue, source) {
+    Ok(value) => json.encode(type JsonValue, value),
+    Err(error) => error,
+  }
+}
+
+fn dynamic_name(source: String) -> String {
+  match json.parse(source) {
+    Ok(value) => match json.asObject(value) {
+      Ok(object) => match json.field(object, "name") {
+        Ok(name) => match json.asString(name) {
+          Ok(decoded) => decoded,
+          Err(error) => error,
+        },
+        Err(error) => error,
+      },
+      Err(error) => error,
+    },
+    Err(error) => error,
+  }
+}

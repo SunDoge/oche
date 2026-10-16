@@ -1,0 +1,16 @@
+async fn later(value: Int) -> Int { value + 1 }
+
+async fn chained(value: Int) -> Int { later(value).await + 1 }
+
+async fn positive(value: Int) -> Result<Int, String> { Ok(value) }
+
+async fn propagated(value: Int) -> Result<Int, String> {
+  try {
+    let inner = positive(value).await?;
+    inner + 1
+  }
+}
+
+async fn propagated_value(value: Int) -> Int {
+  match propagated(value).await { Ok(inner) => inner, Err(_) => -1 }
+}

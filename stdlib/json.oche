@@ -1,0 +1,686 @@
+// Oche implementation of the built-in `comptime jsonEncode(T)` and
+// `comptime jsonDecode(T)` generators.
+// This file is parsed and executed by the normal Oche comptime pipeline.
+
+// ComptimeExpression is the stable, flat protocol exchanged with the compiler.
+// These builders keep graph indexes out of generators and compose into that protocol.
+struct OcheInternalExprBuilder {
+  expressions: List<ComptimeExpression>,
+  root: Int,
+}
+
+struct OcheInternalExprListBuilder {
+  expressions: List<ComptimeExpression>,
+  roots: List<Int>,
+}
+
+struct OcheInternalBlockBuilder {
+  expressions: List<ComptimeExpression>,
+  statements: List<Int>,
+}
+
+struct OcheInternalFnBuilder {
+  name: String,
+  parameters: List<ComptimeParameter>,
+  result: Type,
+}
+
+struct OcheInternalJsonEncoder {
+  function_name: String,
+  functions: List<ComptimeFunction>,
+}
+
+struct OcheInternalJsonDecoder {
+  function_name: String,
+  functions: List<ComptimeFunction>,
+}
+
+struct OcheInternalFieldEncoder {
+  field: Field,
+  encoder: OcheInternalJsonEncoder,
+}
+
+struct OcheInternalFieldEncoders {
+  values: List<OcheInternalFieldEncoder>,
+  functions: List<ComptimeFunction>,
+}
+
+struct OcheInternalFieldDecoder {
+  field: Field,
+  decoder: OcheInternalJsonDecoder,
+}
+
+struct OcheInternalFieldDecoders {
+  values: List<OcheInternalFieldDecoder>,
+  functions: List<ComptimeFunction>,
+}
+
+const fn _oche_ct_expression(
+  kind: String,
+  text: String,
+  ty: Type,
+  children: List<Int>
+) -> ComptimeExpression {
+  ComptimeExpression { kind: kind, text: text, ty: ty, children: children }
+}
+
+const fn _oche_ct_shift_indices(values: List<Int>, offset: Int) -> List<Int> {
+  match values.first() {
+    Some(value) => [value + offset] + _oche_ct_shift_indices(values.rest(), offset),
+    None => [],
+  }
+}
+
+const fn _oche_ct_shift_expression(value: ComptimeExpression, offset: Int) -> ComptimeExpression {
+  ComptimeExpression {
+    kind: value.kind,
+    text: value.text,
+    ty: value.ty,
+    children: _oche_ct_shift_indices(value.children, offset),
+  }
+}
+
+const fn _oche_ct_shift_expressions(values: List<ComptimeExpression>, offset: Int) -> List<
+  ComptimeExpression
+> {
+  match values.first() {
+    Some(value) => [_oche_ct_shift_expression(value, offset)] + _oche_ct_shift_expressions(
+      values.rest(),
+      offset
+    ),
+    None => [],
+  }
+}
+
+const fn _oche_ct_leaf(kind: String, text: String, ty: Type) -> OcheInternalExprBuilder {
+  OcheInternalExprBuilder {
+    expressions: [_oche_ct_expression(kind, text, ty, [])],
+    root: 0,
+  }
+}
+
+const fn _oche_ct_variable(name: String, ty: Type) -> OcheInternalExprBuilder {
+  _oche_ct_leaf("variable", name, ty)
+}
+
+const fn _oche_ct_string_literal(value: String) -> OcheInternalExprBuilder {
+  _oche_ct_leaf("string", value, type String)
+}
+
+const fn _oche_ct_wrap(
+  value: OcheInternalExprBuilder,
+  kind: String,
+  text: String,
+  ty: Type
+) -> OcheInternalExprBuilder {
+  OcheInternalExprBuilder {
+    expressions: value.expressions + [_oche_ct_expression(kind, text, ty, [value.root])],
+    root: value.expressions.len(),
+  }
+}
+
+const fn _oche_ct_field_expr(
+  value: OcheInternalExprBuilder,
+  name: String,
+  ty: Type
+) -> OcheInternalExprBuilder { _oche_ct_wrap(value, "field", name, ty) }
+
+const fn _oche_ct_call_unary(
+  value: OcheInternalExprBuilder,
+  name: String,
+  result: Type
+) -> OcheInternalExprBuilder { _oche_ct_wrap(value, "call", name, result) }
+
+const fn _oche_ct_propagate(
+  value: OcheInternalExprBuilder,
+  result: Type
+) -> OcheInternalExprBuilder { _oche_ct_wrap(value, "propagate", "", result) }
+
+const fn _oche_ct_named_field(
+  value: OcheInternalExprBuilder,
+  name: String,
+  ty: Type
+) -> OcheInternalExprBuilder { _oche_ct_wrap(value, "named", name, ty) }
+
+const fn _oche_ct_empty_expressions() -> OcheInternalExprListBuilder {
+  OcheInternalExprListBuilder { expressions: [], roots: [] }
+}
+
+const fn _oche_ct_push_expression(
+  values: OcheInternalExprListBuilder,
+  value: OcheInternalExprBuilder
+) -> OcheInternalExprListBuilder {
+  let offset = values.expressions.len();
+  OcheInternalExprListBuilder {
+    expressions: values.expressions + _oche_ct_shift_expressions(value.expressions, offset),
+    roots: values.roots + [value.root + offset],
+  }
+}
+
+const fn _oche_ct_finish_many(
+  values: OcheInternalExprListBuilder,
+  kind: String,
+  text: String,
+  ty: Type
+) -> OcheInternalExprBuilder {
+  OcheInternalExprBuilder {
+    expressions: values.expressions + [_oche_ct_expression(kind, text, ty, values.roots)],
+    root: values.expressions.len(),
+  }
+}
+
+const fn _oche_ct_arguments() -> OcheInternalExprListBuilder { _oche_ct_empty_expressions() }
+
+const fn _oche_ct_argument(
+  values: OcheInternalExprListBuilder,
+  value: OcheInternalExprBuilder
+) -> OcheInternalExprListBuilder { _oche_ct_push_expression(values, value) }
+
+const fn _oche_ct_call(
+  values: OcheInternalExprListBuilder,
+  name: String,
+  result: Type
+) -> OcheInternalExprBuilder { _oche_ct_finish_many(values, "call", name, result) }
+
+const fn _oche_ct_list_expr(
+  values: OcheInternalExprListBuilder,
+  element: Type
+) -> OcheInternalExprBuilder {
+  _oche_ct_finish_many(values, "list", "", _oche_type("List", [element]))
+}
+
+const fn _oche_ct_struct_expr(
+  values: OcheInternalExprListBuilder,
+  name: String,
+  ty: Type
+) -> OcheInternalExprBuilder { _oche_ct_finish_many(values, "struct", name, ty) }
+
+const fn _oche_ct_method_zero(
+  value: OcheInternalExprBuilder,
+  name: String,
+  result: Type
+) -> OcheInternalExprBuilder { _oche_ct_wrap(value, "dot_call", name, result) }
+
+const fn _oche_ct_binary(
+  left: OcheInternalExprBuilder,
+  right: OcheInternalExprBuilder,
+  kind: String,
+  result: Type
+) -> OcheInternalExprBuilder {
+  _oche_ct_arguments() |> _oche_ct_argument(left) |> _oche_ct_argument(
+    right
+  ) |> _oche_ct_finish_many(kind, "", result)
+}
+
+const fn _oche_ct_binding_pattern(name: String) -> OcheInternalExprBuilder {
+  _oche_ct_leaf("pattern_binding", name, type Bool)
+}
+
+const fn _oche_ct_variant_pattern(
+  name: String,
+  fields: OcheInternalExprListBuilder
+) -> OcheInternalExprBuilder { _oche_ct_finish_many(fields, "pattern_variant", name, type Bool) }
+
+const fn _oche_ct_match_arm(
+  pattern: OcheInternalExprBuilder,
+  body: OcheInternalExprBuilder
+) -> OcheInternalExprBuilder {
+  _oche_ct_arguments() |> _oche_ct_argument(pattern) |> _oche_ct_argument(
+    body
+  ) |> _oche_ct_finish_many("arm", "", type Bool)
+}
+
+const fn _oche_ct_match_option(
+  value: OcheInternalExprBuilder,
+  binding: String,
+  some: OcheInternalExprBuilder,
+  none: OcheInternalExprBuilder,
+  result: Type
+) -> OcheInternalExprBuilder {
+  let some_pattern = _oche_ct_variant_pattern(
+    "Some",
+    _oche_ct_arguments() |> _oche_ct_argument(_oche_ct_binding_pattern(binding))
+  );
+  let none_pattern = _oche_ct_variant_pattern("None", _oche_ct_arguments());
+  _oche_ct_arguments() |> _oche_ct_argument(value) |> _oche_ct_argument(
+    _oche_ct_match_arm(some_pattern, some)
+  ) |> _oche_ct_argument(_oche_ct_match_arm(none_pattern, none)) |> _oche_ct_finish_many(
+    "match",
+    "",
+    result
+  )
+}
+
+const fn _oche_ct_empty_block() -> OcheInternalBlockBuilder {
+  OcheInternalBlockBuilder { expressions: [], statements: [] }
+}
+
+const fn _oche_ct_let_value(
+  block: OcheInternalBlockBuilder,
+  name: String,
+  value: OcheInternalExprBuilder
+) -> OcheInternalBlockBuilder {
+  let offset = block.expressions.len();
+  let shifted = _oche_ct_shift_expressions(value.expressions, offset);
+  let statement = block.expressions.len() + shifted.len();
+  OcheInternalBlockBuilder {
+    expressions: block.expressions + shifted + [
+      _oche_ct_expression("let", name, type Bool, [value.root + offset])
+    ],
+    statements: block.statements + [statement],
+  }
+}
+
+const fn _oche_ct_finish_block(
+  block: OcheInternalBlockBuilder,
+  tail: OcheInternalExprBuilder,
+  kind: String,
+  ty: Type
+) -> OcheInternalExprBuilder {
+  let offset = block.expressions.len();
+  let shifted = _oche_ct_shift_expressions(tail.expressions, offset);
+  let root = block.expressions.len() + shifted.len();
+  OcheInternalExprBuilder {
+    expressions: block.expressions + shifted + [
+      _oche_ct_expression(kind, "", ty, block.statements + [tail.root + offset])
+    ],
+    root: root,
+  }
+}
+
+const fn _oche_ct_function_builder(
+  name: String,
+  parameters: List<ComptimeParameter>,
+  result: Type
+) -> OcheInternalFnBuilder {
+  OcheInternalFnBuilder { name: name, parameters: parameters, result: result }
+}
+
+const fn _oche_ct_returns(
+  builder: OcheInternalFnBuilder,
+  body: OcheInternalExprBuilder
+) -> ComptimeFunction {
+  ComptimeFunction {
+    name: builder.name,
+    parameters: builder.parameters,
+    result: builder.result,
+    expressions: body.expressions,
+    root: body.root,
+  }
+}
+
+const fn _oche_ct_first_type(value: Type) -> Type {
+  match value.arguments.first() {
+    Some(element) => element,
+    None => type JsonValue,
+  }
+}
+
+const fn _oche_ct_option_type(value: Type) -> Type { _oche_type("Option", [value]) }
+
+const fn _oche_ct_result_type(value: Type) -> Type { _oche_type("Result", [value, type String]) }
+
+const fn _oche_ct_list_type(value: Type) -> Type { _oche_type("List", [value]) }
+
+const fn _oche_ct_primitive_encoder(function_name: String) -> OcheInternalJsonEncoder {
+  OcheInternalJsonEncoder { function_name: function_name, functions: [] }
+}
+
+const fn _oche_ct_primitive_decoder(function_name: String) -> OcheInternalJsonDecoder {
+  OcheInternalJsonDecoder { function_name: function_name, functions: [] }
+}
+
+const fn _oche_ct_json_encode_value_name(ty: Type) -> String {
+  "_oche_generated_json_encode_value_" + ty.name
+}
+
+const fn _oche_ct_json_encode_name(ty: Type) -> String {
+  "_oche_generated_json_encode_" + ty.name
+}
+
+const fn _oche_ct_json_decode_value_name(ty: Type) -> String {
+  "_oche_generated_json_decode_value_" + ty.name
+}
+
+const fn _oche_ct_json_decode_name(ty: Type) -> String {
+  "_oche_generated_json_decode_" + ty.name
+}
+
+const fn _oche_ct_jsonEncoder(ty: Type, helper: String) -> OcheInternalJsonEncoder {
+  match ty.name {
+    "Int" => _oche_ct_primitive_encoder("_oche_json_from_int"),
+    "Float" => _oche_ct_primitive_encoder("_oche_json_from_float"),
+    "Bool" => _oche_ct_primitive_encoder("_oche_json_from_bool"),
+    "String" => _oche_ct_primitive_encoder("_oche_json_from_string"),
+    "List" => _oche_ct_list_encoder(ty, helper),
+    _ => _oche_ct_primitive_encoder(_oche_ct_json_encode_value_name(ty)),
+  }
+}
+
+const fn _oche_ct_jsonDecoder(ty: Type, helper: String) -> OcheInternalJsonDecoder {
+  match ty.name {
+    "Int" => _oche_ct_primitive_decoder("_oche_json_as_int"),
+    "Float" => _oche_ct_primitive_decoder("_oche_json_as_float"),
+    "Bool" => _oche_ct_primitive_decoder("_oche_json_as_bool"),
+    "String" => _oche_ct_primitive_decoder("_oche_json_as_string"),
+    "List" => _oche_ct_list_decoder(ty, helper),
+    _ => _oche_ct_primitive_decoder(_oche_ct_json_decode_value_name(ty)),
+  }
+}
+
+const fn _oche_ct_list_encode_values_body(
+  values_ty: Type,
+  element: Type,
+  element_encoder: String,
+  recurse: String
+) -> OcheInternalExprBuilder {
+  let json_values = _oche_ct_list_type(type JsonValue);
+  let first = _oche_ct_variable("values", values_ty) |> _oche_ct_method_zero(
+    "first",
+    _oche_ct_option_type(element)
+  );
+  let encoded = _oche_ct_variable("item", element) |> _oche_ct_call_unary(
+    element_encoder,
+    type JsonValue
+  );
+  let head = _oche_ct_arguments() |> _oche_ct_argument(encoded) |> _oche_ct_list_expr(
+    type JsonValue
+  );
+  let tail = _oche_ct_variable("values", values_ty) |> _oche_ct_method_zero(
+    "rest",
+    values_ty
+  ) |> _oche_ct_call_unary(recurse, json_values);
+  _oche_ct_match_option(
+    first,
+    "item",
+    _oche_ct_binary(head, tail, "add", json_values),
+    _oche_ct_arguments() |> _oche_ct_list_expr(type JsonValue),
+    json_values
+  )
+}
+
+const fn _oche_ct_list_decode_values_body(
+  result_list: Type,
+  element: Type,
+  element_decoder: String,
+  recurse: String
+) -> OcheInternalExprBuilder {
+  let json_values = _oche_ct_list_type(type JsonValue);
+  let first = _oche_ct_variable("values", json_values) |> _oche_ct_method_zero(
+    "first",
+    _oche_ct_option_type(type JsonValue)
+  );
+  let decoded = _oche_ct_variable("item", type JsonValue) |> _oche_ct_call_unary(
+    element_decoder,
+    _oche_ct_result_type(element)
+  ) |> _oche_ct_propagate(element);
+  let head = _oche_ct_arguments() |> _oche_ct_argument(decoded) |> _oche_ct_list_expr(element);
+  let tail = _oche_ct_variable("values", json_values) |> _oche_ct_method_zero(
+    "rest",
+    json_values
+  ) |> _oche_ct_call_unary(recurse, _oche_ct_result_type(result_list)) |> _oche_ct_propagate(
+    result_list
+  );
+  let body = _oche_ct_match_option(
+    first,
+    "item",
+    _oche_ct_binary(head, tail, "add", result_list),
+    _oche_ct_arguments() |> _oche_ct_list_expr(element),
+    result_list
+  );
+  _oche_ct_empty_block() |> _oche_ct_finish_block(body, "try", result_list)
+}
+
+const fn _oche_ct_list_encoder(ty: Type, helper: String) -> OcheInternalJsonEncoder {
+  let element = _oche_ct_first_type(ty);
+  let element_encoder = _oche_ct_jsonEncoder(element, helper + "_item");
+  let encode_values = helper + "_encode_values";
+  let encoder = helper + "_encode";
+  OcheInternalJsonEncoder {
+    function_name: encoder,
+    functions: element_encoder.functions + [
+      _oche_ct_function_builder(
+        encode_values,
+        [ComptimeParameter { name: "values", ty: ty }],
+        _oche_ct_list_type(type JsonValue)
+      ) |> _oche_ct_returns(
+        _oche_ct_list_encode_values_body(ty, element, element_encoder.function_name, encode_values)
+      ),
+      _oche_ct_function_builder(
+        encoder,
+        [ComptimeParameter { name: "values", ty: ty }],
+        type JsonValue
+      ) |> _oche_ct_returns(
+        _oche_ct_variable("values", ty) |> _oche_ct_call_unary(
+          encode_values,
+          _oche_ct_list_type(type JsonValue)
+        ) |> _oche_ct_call_unary("_oche_json_array", type JsonValue)
+      ),
+    ],
+  }
+}
+
+const fn _oche_ct_list_decoder(ty: Type, helper: String) -> OcheInternalJsonDecoder {
+  let element = _oche_ct_first_type(ty);
+  let element_decoder = _oche_ct_jsonDecoder(element, helper + "_item");
+  let decode_values = helper + "_decode_values";
+  let decoder = helper + "_decode";
+  OcheInternalJsonDecoder {
+    function_name: decoder,
+    functions: element_decoder.functions + [
+      _oche_ct_function_builder(
+        decode_values,
+        [ComptimeParameter { name: "values", ty: _oche_ct_list_type(type JsonValue) }],
+        _oche_ct_result_type(ty)
+      ) |> _oche_ct_returns(
+        _oche_ct_list_decode_values_body(ty, element, element_decoder.function_name, decode_values)
+      ),
+      _oche_ct_function_builder(
+        decoder,
+        [ComptimeParameter { name: "value", ty: type JsonValue }],
+        _oche_ct_result_type(ty)
+      ) |> _oche_ct_returns(
+        _oche_ct_empty_block() |> _oche_ct_finish_block(
+          _oche_ct_variable("value", type JsonValue) |> _oche_ct_call_unary(
+            "_oche_json_as_array",
+            _oche_ct_result_type(_oche_ct_list_type(type JsonValue))
+          ) |> _oche_ct_propagate(_oche_ct_list_type(type JsonValue)) |> _oche_ct_call_unary(
+            decode_values,
+            _oche_ct_result_type(ty)
+          ) |> _oche_ct_propagate(ty),
+          "try",
+          ty
+        )
+      ),
+    ],
+  }
+}
+
+const fn _oche_ct_prepend_field_encoder(
+  target: Type,
+  field: Field,
+  rest_fields: List<Field>
+) -> OcheInternalFieldEncoders {
+  let encoder = _oche_ct_jsonEncoder(field.ty, "_oche_json_" + target.name + "_" + field.name);
+  let rest = _oche_ct_field_encoders(target, rest_fields);
+  OcheInternalFieldEncoders {
+    values: [OcheInternalFieldEncoder { field: field, encoder: encoder }] + rest.values,
+    functions: encoder.functions + rest.functions,
+  }
+}
+
+const fn _oche_ct_field_encoders(target: Type, fields: List<Field>) -> OcheInternalFieldEncoders {
+  match fields.first() {
+    Some(field) => _oche_ct_prepend_field_encoder(target, field, fields.rest()),
+    None => OcheInternalFieldEncoders { values: [], functions: [] },
+  }
+}
+
+const fn _oche_ct_prepend_field_decoder(
+  target: Type,
+  field: Field,
+  rest_fields: List<Field>
+) -> OcheInternalFieldDecoders {
+  let decoder = _oche_ct_jsonDecoder(field.ty, "_oche_json_" + target.name + "_" + field.name);
+  let rest = _oche_ct_field_decoders(target, rest_fields);
+  OcheInternalFieldDecoders {
+    values: [OcheInternalFieldDecoder { field: field, decoder: decoder }] + rest.values,
+    functions: decoder.functions + rest.functions,
+  }
+}
+
+const fn _oche_ct_field_decoders(target: Type, fields: List<Field>) -> OcheInternalFieldDecoders {
+  match fields.first() {
+    Some(field) => _oche_ct_prepend_field_decoder(target, field, fields.rest()),
+    None => OcheInternalFieldDecoders { values: [], functions: [] },
+  }
+}
+
+const fn _oche_ct_encode_names(
+  fields: List<OcheInternalFieldEncoder>,
+  built: OcheInternalExprListBuilder
+) -> OcheInternalExprListBuilder {
+  match fields.first() {
+    Some(value) => _oche_ct_encode_names(
+      fields.rest(),
+      built |> _oche_ct_argument(_oche_ct_string_literal(value.field.name))
+    ),
+    None => built,
+  }
+}
+
+const fn _oche_ct_encode_values(
+  target: Type,
+  fields: List<OcheInternalFieldEncoder>,
+  built: OcheInternalExprListBuilder
+) -> OcheInternalExprListBuilder {
+  match fields.first() {
+    Some(value) => _oche_ct_encode_values(
+      target,
+      fields.rest(),
+      built |> _oche_ct_argument(
+        _oche_ct_variable("value", target) |> _oche_ct_field_expr(
+          value.field.name,
+          value.field.ty
+        ) |> _oche_ct_call_unary(value.encoder.function_name, type JsonValue)
+      )
+    ),
+    None => built,
+  }
+}
+
+const fn _oche_ct_decode_fields(
+  fields: List<OcheInternalFieldDecoder>,
+  built: OcheInternalExprListBuilder
+) -> OcheInternalExprListBuilder {
+  match fields.first() {
+    Some(value) => _oche_ct_decode_fields(
+      fields.rest(),
+      built |> _oche_ct_argument(
+        _oche_ct_arguments() |> _oche_ct_argument(
+          _oche_ct_variable("object", type JsonObject)
+        ) |> _oche_ct_argument(_oche_ct_string_literal(value.field.name)) |> _oche_ct_call(
+          "_oche_json_field",
+          type JsonValue
+        ) |> _oche_ct_propagate(type JsonValue) |> _oche_ct_call_unary(
+          value.decoder.function_name,
+          _oche_ct_result_type(value.field.ty)
+        ) |> _oche_ct_propagate(value.field.ty) |> _oche_ct_named_field(
+          value.field.name,
+          value.field.ty
+        )
+      )
+    ),
+    None => built,
+  }
+}
+
+const fn _oche_ct_encode_value_body(
+  target: Type,
+  fields: List<OcheInternalFieldEncoder>
+) -> OcheInternalExprBuilder {
+  _oche_ct_arguments() |> _oche_ct_argument(
+    _oche_ct_encode_names(fields, _oche_ct_arguments()) |> _oche_ct_list_expr(type String)
+  ) |> _oche_ct_argument(
+    _oche_ct_encode_values(target, fields, _oche_ct_arguments()) |> _oche_ct_list_expr(
+      type JsonValue
+    )
+  ) |> _oche_ct_call("_oche_json_object", type JsonValue)
+}
+
+const fn _oche_ct_decode_value_body(
+  target: Type,
+  fields: List<OcheInternalFieldDecoder>
+) -> OcheInternalExprBuilder {
+  _oche_ct_empty_block() |> _oche_ct_let_value(
+    "object",
+    _oche_ct_variable("value", type JsonValue) |> _oche_ct_call_unary(
+      "_oche_json_as_object",
+      _oche_ct_result_type(type JsonObject)
+    ) |> _oche_ct_propagate(type JsonObject)
+  ) |> _oche_ct_finish_block(
+    _oche_ct_decode_fields(fields, _oche_ct_arguments()) |> _oche_ct_struct_expr(
+      target.name,
+      target
+    ),
+    "try",
+    target
+  )
+}
+
+const fn _oche_ct_encode_body(target: Type) -> OcheInternalExprBuilder {
+  _oche_ct_variable("value", target) |> _oche_ct_call_unary(
+    _oche_ct_json_encode_value_name(target),
+    type JsonValue
+  ) |> _oche_ct_call_unary("_oche_json_stringify", type String)
+}
+
+const fn _oche_ct_decode_body(target: Type) -> OcheInternalExprBuilder {
+  _oche_ct_empty_block() |> _oche_ct_finish_block(
+    _oche_ct_variable("source", type String) |> _oche_ct_call_unary(
+      "_oche_json_parse",
+      _oche_ct_result_type(type JsonValue)
+    ) |> _oche_ct_propagate(type JsonValue) |> _oche_ct_call_unary(
+      _oche_ct_json_decode_value_name(target),
+      _oche_ct_result_type(target)
+    ) |> _oche_ct_propagate(target),
+    "try",
+    target
+  )
+}
+
+const fn _oche_generate_json_encode(target: Type) -> ComptimeDeclarations {
+  let encoders = _oche_ct_field_encoders(target, target.fields);
+  ComptimeDeclarations {
+    functions: encoders.functions + [
+      _oche_ct_function_builder(
+        _oche_ct_json_encode_value_name(target),
+        [ComptimeParameter { name: "value", ty: target }],
+        type JsonValue
+      ) |> _oche_ct_returns(_oche_ct_encode_value_body(target, encoders.values)),
+      _oche_ct_function_builder(
+        _oche_ct_json_encode_name(target),
+        [ComptimeParameter { name: "value", ty: target }],
+        type String
+      ) |> _oche_ct_returns(_oche_ct_encode_body(target)),
+    ],
+  }
+}
+
+const fn _oche_generate_json_decode(target: Type) -> ComptimeDeclarations {
+  let decoders = _oche_ct_field_decoders(target, target.fields);
+  ComptimeDeclarations {
+    functions: decoders.functions + [
+      _oche_ct_function_builder(
+        _oche_ct_json_decode_value_name(target),
+        [ComptimeParameter { name: "value", ty: type JsonValue }],
+        _oche_ct_result_type(target)
+      ) |> _oche_ct_returns(_oche_ct_decode_value_body(target, decoders.values)),
+      _oche_ct_function_builder(
+        _oche_ct_json_decode_name(target),
+        [ComptimeParameter { name: "source", ty: type String }],
+        _oche_ct_result_type(target)
+      ) |> _oche_ct_returns(_oche_ct_decode_body(target)),
+    ],
+  }
+}

@@ -1,0 +1,68 @@
+struct User {
+  name: String,
+  age: Int,
+}
+
+struct Batch {
+  counts: List<Int>,
+  labels: List<List<String>>,
+}
+
+struct Envelope {
+  owner: User,
+  batches: List<Batch>,
+}
+
+comptime jsonEncode(User)
+
+comptime jsonDecode(User)
+
+comptime jsonEncode(Batch)
+
+comptime jsonDecode(Batch)
+
+comptime jsonEncode(Envelope)
+
+comptime jsonDecode(Envelope)
+
+// Generators materialize typed functions before runtime lowering.
+comptime validate(User, name: non_empty, age: range(0, 130))
+
+fn encode_user(name: String, age: Int) -> String { User { name: name, age: age }.toJson() }
+
+fn round_trip(source: String) -> String {
+  match User.fromJson(source) {
+    Ok(user) => user.toJson(),
+    Err(error) => error,
+  }
+}
+
+fn validate_user(name: String, age: Int) -> String {
+  match User_validate(User { name: name, age: age }) {
+    Ok(user) => user.toJson(),
+    Err(error) => error,
+  }
+}
+
+fn struct_name(name: String, age: Int) -> String {
+  let user = User { name: name, age: age };
+  match user {
+    User { name: result, .. } => result,
+  }
+}
+
+fn struct_age(name: String, age: Int) -> Int { User { name: name, age: age }.age }
+
+fn round_trip_batch(source: String) -> String {
+  match Batch.fromJson(source) {
+    Ok(batch) => batch.toJson(),
+    Err(error) => error,
+  }
+}
+
+fn round_trip_envelope(source: String) -> String {
+  match Envelope.fromJson(source) {
+    Ok(envelope) => envelope.toJson(),
+    Err(error) => error,
+  }
+}

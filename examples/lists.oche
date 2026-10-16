@@ -1,0 +1,13 @@
+fn integers() -> List<Int> { [1, 2, 3] }
+
+fn nested() -> List<List<Int>> { [[1], [2, 3]] }
+
+fn empty() -> List<String> { [] }
+
+fn append(values: List<Int>) -> List<Int> { values + [4] }
+
+fn count(values: List<Int>) -> Int { values.len() }
+
+fn last() -> String { match ["agent", "tool"].last() { Some(value) => value, None => "" } }
+
+fn classify(value: String) -> Int { match value { "agent" => 1, _ => 0 } }

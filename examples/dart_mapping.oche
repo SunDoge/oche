@@ -1,0 +1,68 @@
+struct Pair {
+  left: Int,
+  right: Int,
+}
+
+enum Signal {
+  Value(Int),
+  Stop,
+}
+
+fn scalar_int(value: Int) -> Int { value + 1 }
+
+fn scalar_float(value: Float) -> Float { value * 2.0 }
+
+fn scalar_bool(value: Bool) -> Bool { value }
+
+fn scalar_string(value: String) -> String { value }
+
+fn list_value() -> Int { match [40, 42].last() { Some(value) => value, None => 0 } }
+
+fn list_count(values: List<Int>) -> Int { values.len() }
+
+fn struct_value(left: Int, right: Int) -> Int { Pair { left: left, right: right }.right }
+
+fn union_value(value: Int) -> Int {
+  match Value(value) {
+    Value(inner) => inner,
+    Stop => 0,
+  }
+}
+
+fn checked(value: Int) -> Result<Int, String> {
+  match value {
+    0 => Err("zero"),
+    _ => Ok(value),
+  }
+}
+
+fn result_value(value: Int) -> Int {
+  match checked(value) {
+    Ok(inner) => inner,
+    Err(_) => -1,
+  }
+}
+
+fn propagated(value: Int) -> Result<Int, String> {
+  try {
+    let inner = checked(value)?;
+    inner + 1
+  }
+}
+
+fn propagation_value(value: Int) -> Int {
+  match propagated(value) {
+    Ok(inner) => inner,
+    Err(_) => -1,
+  }
+}
+
+fn mutable_value(value: Int) -> Int {
+  let mut current = value;
+  current = current + 1;
+  current
+}
+
+async fn later(value: Int) -> Int { value + 1 }
+
+async fn async_value(value: Int) -> Int { later(value).await + 1 }

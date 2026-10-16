@@ -1,0 +1,81 @@
+const fn capacity() -> Int { 32 * 1024 }
+
+const fn ratio() -> Float { 1.5 * 2.0 }
+
+const fn enabled() -> Bool { true }
+
+const fn label() -> String { "agent" + "-runtime" }
+
+const fn scale(value: Int, factor: Int) -> Int { value * factor }
+
+const fn append_marker(values: List<Int>) -> List<Int> { values + [42] }
+
+const fn nested(values: List<Int>) -> List<List<Int>> { [values, values + [3]] }
+
+struct Config {
+  name: String,
+  limits: List<Int>,
+}
+
+struct Settings {
+  config: Config,
+  enabled: Bool,
+}
+
+const fn configured(name: String) -> Config { Config { name: name, limits: [1, 2] } }
+
+const fn settings() -> Settings {
+  Settings { config: Config { name: "agent", limits: [3, 5] }, enabled: true }
+}
+
+const fn reflected_name(value: Type) -> String { value.name }
+
+const fn reflected_identity(value: Type) -> Type { value }
+
+const fn reflected_field_count(value: Type) -> Int { value.fields.len() }
+
+const fn reflected_first_field(value: Type) -> String {
+  match value.fields.first() {
+    Some(field) => field.name,
+    None => "",
+  }
+}
+
+fn capacity_value() -> Int { comptime capacity() }
+
+fn ratio_value() -> Float { comptime ratio() }
+
+fn enabled_value() -> Bool { comptime enabled() }
+
+fn label_value() -> String { comptime label() }
+
+fn scaled_value() -> Int { comptime scale(21, 2) }
+
+fn other_scaled_value() -> Int { comptime scale(10, 3) }
+
+fn compiled_values() -> List<Int> { comptime append_marker([1, 2]) }
+
+fn nested_values() -> List<List<Int>> { comptime nested([1, 2]) }
+
+fn compiled_config_name() -> String { (comptime configured("agent")).name }
+
+fn compiled_config_limit() -> Int {
+  match(comptime configured("agent")).limits.last() {
+    Some(value) => value,
+    None => 0,
+  }
+}
+
+fn compiled_settings_name() -> String { (comptime settings()).config.name }
+
+fn config_type_name() -> String { comptime reflected_name(type Config) }
+
+fn returned_type_name() -> String { (comptime reflected_identity(type Config)).name }
+
+fn returned_type_arguments() -> Int {
+  (comptime reflected_identity(type List<List<Int>>)).arguments.len()
+}
+
+fn config_field_count() -> Int { comptime reflected_field_count(type Config) }
+
+fn config_first_field() -> String { comptime reflected_first_field(type Config) }

@@ -1,0 +1,6 @@
+// Initial syntax: explicit Int parameters and an expression as the body.
+fn add(a: Int, b: Int) -> Int { a + b }
+
+fn offset(value: Int) -> Int { (value + 2) * 3 }
+
+fn negate(value: Int) -> Int { -value }

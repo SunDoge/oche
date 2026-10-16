@@ -1,0 +1,11 @@
+pub fn add(left: Int, right: Int) -> Int { left + right }
+
+pub fn greet(name: String) -> String { "hello, " + name }
+
+pub fn echo_bool(value: Bool) -> Bool { value }
+
+pub fn scale(value: Float, factor: Float) -> Float { value * factor }
+
+pub async fn later(value: Int) -> Int { value + 1 }
+
+pub async fn later_float(value: Float) -> Float { value + 0.5 }

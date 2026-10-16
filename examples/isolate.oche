@@ -1,0 +1,7 @@
+import "std/isolate" as isolate
+
+fn double(value: Int) -> Int { value * 2 }
+
+async fn isolatedDouble(value: Int) -> Int {
+  isolate.run(double(value)).await
+}

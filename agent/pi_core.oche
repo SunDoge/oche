@@ -1,0 +1,1302 @@
+// Scheduling kernel modeled after pi-agent-core's outer agent loop. The
+// TypeScript host owns messages, streams, tools, and AbortSignal. Oche owns the
+// decision about which effect the host must execute next.
+import "scheduler_policy.oche" as policy
+
+import "std/json" as json
+
+struct MessageSummary {
+  role: String,
+  tool_calls: Int,
+  failed: Bool,
+}
+
+struct MessageBatchSummary {
+  count: Int,
+  last_role: String,
+  last_tool_calls: Int,
+  last_failed: Bool,
+}
+
+struct ToolChangeCandidate {
+  changed: Bool,
+  has_pending: Bool,
+  pending_had_changes: Bool,
+  keep: MessageBatchSummary,
+  rewrite: MessageBatchSummary,
+  insert: MessageBatchSummary,
+}
+
+struct ContinuationEntryCandidates {
+  direct: ToolChangeCandidate,
+  steering: ToolChangeCandidate,
+  follow_up: ToolChangeCandidate,
+}
+
+struct ToolBatchSummary {
+  observed: Bool,
+  total: Int,
+  failed: Int,
+  terminate: Bool,
+}
+
+struct QueueSummary {
+  observed: Bool,
+  steering: Int,
+  follow_up: Int,
+  force_continue: Bool,
+  force_end: Bool,
+}
+
+struct ContinuePlan {
+  action: Int,
+  queue: Int,
+  take: Int,
+}
+
+struct ContinueEntryPlan {
+  action: Int,
+  queue: Int,
+  take: Int,
+  tool_action: Int,
+  state: String,
+}
+
+struct QueueCompletion {
+  queue: Int,
+  state: String,
+}
+
+struct QueuePollPlan {
+  poll_follow_up: Bool,
+  completion: String,
+}
+
+struct QueueDrainPlan {
+  queue: Int,
+  take: Int,
+  state: String,
+}
+
+struct ModelCompletionPlan {
+  state: String,
+  run_tools_sequential: Bool,
+}
+
+struct ModelExecutionPlan {
+  state: String,
+  tool_action: Int,
+}
+
+struct ToolChangePlan {
+  action: Int,
+  state: String,
+}
+
+struct Machine {
+  schema: Int,
+  phase: Int,
+  turn: Int,
+  must_continue: Bool,
+  effect: Int,
+  error: String,
+  transition_count: Int,
+  message_count: Int,
+  history: List<String>,
+  messages: List<MessageSummary>,
+  tool_batch: ToolBatchSummary,
+  queues: QueueSummary,
+}
+
+pub fn abi_version() -> Int { 2 }
+
+fn machine(
+  phase: Int,
+  turn: Int,
+  must_continue: Bool,
+  effect: Int,
+  transition_count: Int,
+  message_count: Int,
+  history: List<String>,
+  messages: List<MessageSummary>,
+  tool_batch: ToolBatchSummary,
+  queues: QueueSummary
+) -> String {
+  json.encode(
+    type Machine,
+    Machine {
+      schema: 2,
+      phase: phase,
+      turn: turn,
+      must_continue: must_continue,
+      effect: effect,
+      error: "",
+      transition_count: transition_count,
+      message_count: message_count,
+      history: history,
+      messages: messages,
+      tool_batch: tool_batch,
+      queues: queues,
+    }
+  )
+}
+
+fn invalid(error: String) -> String {
+  json.encode(
+    type Machine,
+    Machine {
+      schema: 2,
+      phase: 4,
+      turn: 0,
+      must_continue: false,
+      effect: 5,
+      error: error,
+      transition_count: 0,
+      message_count: 0,
+      history: [],
+      messages: [],
+      tool_batch: ToolBatchSummary {
+        observed: false,
+        total: 0,
+        failed: 0,
+        terminate: false,
+      },
+      queues: QueueSummary {
+        observed: false,
+        steering: 0,
+        follow_up: 0,
+        force_continue: false,
+        force_end: false,
+      },
+    }
+  )
+}
+
+// Effects: 1=request model, 2=execute tools, 3=poll queues, 4=done,
+// 5=invalid state. Phases: 1=model, 2=tools, 3=queues, 4=done.
+fn empty_tool_batch() -> ToolBatchSummary {
+  ToolBatchSummary { observed: false, total: 0, failed: 0, terminate: false }
+}
+
+fn empty_queues() -> QueueSummary {
+  QueueSummary {
+    observed: false,
+    steering: 0,
+    follow_up: 0,
+    force_continue: false,
+    force_end: false,
+  }
+}
+
+pub fn start() -> String {
+  machine(1, 1, false, 1, 1, 0, ["start"], [], empty_tool_batch(), empty_queues())
+}
+
+pub fn restore(source: String) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.schema {
+      2 => json.encode(type Machine, state),
+      _ => invalid("unsupported machine schema"),
+    },
+    Err(error) => invalid(error),
+  }
+}
+
+fn replayed_messages(
+  count: Int,
+  last_role: String,
+  last_tool_calls: Int,
+  last_failed: Bool
+) -> List<MessageSummary> {
+  match count {
+    0 => [],
+    _ => [
+      MessageSummary {
+        role: last_role,
+        tool_calls: last_tool_calls,
+        failed: last_failed,
+      },
+    ],
+  }
+}
+
+fn begin_restored(
+  state: Machine,
+  count: Int,
+  last_role: String,
+  last_tool_calls: Int,
+  last_failed: Bool
+) -> String {
+  match state.phase {
+    1 => machine(
+      1,
+      state.turn,
+      false,
+      1,
+      state.transition_count,
+      count,
+      state.history,
+      replayed_messages(count, last_role, last_tool_calls, last_failed),
+      empty_tool_batch(),
+      empty_queues()
+    ),
+    4 => machine(
+      1,
+      state.turn + 1,
+      false,
+      1,
+      state.transition_count + 1,
+      count,
+      ["enter"],
+      replayed_messages(count, last_role, last_tool_calls, last_failed),
+      empty_tool_batch(),
+      empty_queues()
+    ),
+    _ => invalid("restored machine must enter from the model or done phase"),
+  }
+}
+
+pub fn enter(source: String) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => begin_restored(state, 0, "", 0, false),
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn restore_begin_with_messages(
+  source: String,
+  count: Int,
+  last_role: String,
+  last_tool_calls: Int,
+  last_failed: Bool
+) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.schema {
+      2 => begin_restored(state, count, last_role, last_tool_calls, last_failed),
+      _ => invalid("unsupported machine schema"),
+    },
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn observe_message(source: String, role: String, tool_calls: Int, failed: Bool) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => machine(
+      state.phase,
+      state.turn,
+      state.must_continue,
+      state.effect,
+      state.transition_count,
+      state.message_count + 1,
+      state.history,
+      [MessageSummary { role: role, tool_calls: tool_calls, failed: failed }],
+      state.tool_batch,
+      state.queues
+    ),
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn observe_message_batch(
+  source: String,
+  count: Int,
+  last_role: String,
+  last_tool_calls: Int,
+  last_failed: Bool
+) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => machine(
+      state.phase,
+      state.turn,
+      state.must_continue,
+      state.effect,
+      state.transition_count,
+      state.message_count + count,
+      state.history,
+      match count {
+        0 => state.messages,
+        _ => [
+          MessageSummary {
+            role: last_role,
+            tool_calls: last_tool_calls,
+            failed: last_failed,
+          },
+        ],
+      },
+      state.tool_batch,
+      state.queues
+    ),
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn begin_with_messages(
+  source: String,
+  resume: Bool,
+  count: Int,
+  last_role: String,
+  last_tool_calls: Int,
+  last_failed: Bool
+) -> String {
+  match resume {
+    true => restore_begin_with_messages(source, count, last_role, last_tool_calls, last_failed),
+    _ => observe_message_batch(start(), count, last_role, last_tool_calls, last_failed),
+  }
+}
+
+pub fn observe_tool_batch(source: String, total: Int, failed: Int, terminate: Bool) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => machine(
+      state.phase,
+      state.turn,
+      state.must_continue,
+      state.effect,
+      state.transition_count,
+      state.message_count,
+      state.history,
+      state.messages,
+      ToolBatchSummary {
+        observed: true,
+        total: total,
+        failed: failed,
+        terminate: terminate,
+      },
+      state.queues
+    ),
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn observe_queues(
+  source: String,
+  steering: Int,
+  follow_up: Int,
+  force_continue: Bool,
+  force_end: Bool
+) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => machine(
+      state.phase,
+      state.turn,
+      state.must_continue,
+      state.effect,
+      state.transition_count,
+      state.message_count,
+      state.history,
+      state.messages,
+      state.tool_batch,
+      QueueSummary {
+        observed: true,
+        steering: steering,
+        follow_up: follow_up,
+        force_continue: force_continue,
+        force_end: force_end,
+      }
+    ),
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn observed_message_count(source: String) -> Int {
+  match json.decode(type Machine, source) {
+    Ok(state) => state.message_count,
+    Err(_) => 0,
+  }
+}
+
+// Tail kinds: 0=empty/invalid, 1=assistant, 2=tool result, 3=user,
+// 4=system, 5=custom or unknown.
+pub fn tail_message_kind(source: String) -> Int {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.messages.last() {
+      Some(message) => match message.role {
+        "assistant" => 1,
+        "toolResult" => 2,
+        "user" => 3,
+        "system" => 4,
+        _ => 5,
+      },
+      None => 0,
+    },
+    Err(_) => 0,
+  }
+}
+
+// Continue kinds: 0=empty/system-only, 1=assistant tail, 2=continuable tail.
+pub fn classify_message_tail(total: Int, system: Int, tail_role: String) -> Int {
+  policy.classify_message_tail(total, system, tail_role)
+}
+
+pub fn tool_batch_terminates(total: Int, terminating: Int) -> Bool {
+  policy.tool_batch_terminates(total, terminating)
+}
+
+pub fn queue_take(available: Int, take_all: Bool) -> Int { policy.queue_take(available, take_all) }
+
+pub fn tools_run_sequential(global_sequential: Bool, has_sequential: Bool) -> Bool {
+  policy.tools_run_sequential(global_sequential, has_sequential)
+}
+
+// Queues: 0=none, 1=steering, 2=follow-up.
+pub fn select_queue(steering: Int, follow_up: Int) -> Int {
+  policy.select_queue(steering, follow_up)
+}
+
+// Message kinds: 0=empty/system-only, 1=assistant tail, 2=continuable tail.
+// Actions: 0=no messages, 1=continue context, 2=steering, 3=follow-up,
+// 4=assistant tail without queued input.
+pub fn continue_action(message_kind: Int, queue: Int) -> Int {
+  policy.continue_action(message_kind, queue)
+}
+
+fn queue_available(queue: Int, steering: Int, follow_up: Int) -> Int {
+  policy.queue_available(queue, steering, follow_up)
+}
+
+fn queue_take_all(queue: Int, steering_all: Bool, follow_up_all: Bool) -> Bool {
+  policy.queue_take_all(queue, steering_all, follow_up_all)
+}
+
+pub fn continue_plan(
+  total: Int,
+  system: Int,
+  tail_role: String,
+  steering: Int,
+  follow_up: Int,
+  steering_all: Bool,
+  follow_up_all: Bool
+) -> String {
+  let message_kind = classify_message_tail(total, system, tail_role);
+  let queue = select_queue(steering, follow_up);
+  json.encode(
+    type ContinuePlan,
+    ContinuePlan {
+      action: continue_action(message_kind, queue),
+      queue: queue,
+      take: queue_take(
+        queue_available(queue, steering, follow_up),
+        queue_take_all(queue, steering_all, follow_up_all)
+      ),
+    }
+  )
+}
+
+pub fn should_poll_follow_up(natural_continue: Bool, steering: Int, force_end: Bool) -> Bool {
+  policy.should_poll_follow_up(natural_continue, steering, force_end)
+}
+
+// Tool-change actions: 0=keep messages, 1=rewrite pending system message,
+// 2=insert a new system message.
+pub fn tool_change_action(changed: Bool, has_pending: Bool, pending_had_changes: Bool) -> Int {
+  policy.tool_change_action(changed, has_pending, pending_had_changes)
+}
+
+fn select_tool_change_batch(
+  action: Int,
+  keep_count: Int,
+  keep_last_role: String,
+  keep_last_tool_calls: Int,
+  keep_last_failed: Bool,
+  rewrite_count: Int,
+  rewrite_last_role: String,
+  rewrite_last_tool_calls: Int,
+  rewrite_last_failed: Bool,
+  insert_count: Int,
+  insert_last_role: String,
+  insert_last_tool_calls: Int,
+  insert_last_failed: Bool
+) -> MessageBatchSummary {
+  match action {
+    1 => MessageBatchSummary {
+      count: rewrite_count,
+      last_role: rewrite_last_role,
+      last_tool_calls: rewrite_last_tool_calls,
+      last_failed: rewrite_last_failed,
+    },
+    2 => MessageBatchSummary {
+      count: insert_count,
+      last_role: insert_last_role,
+      last_tool_calls: insert_last_tool_calls,
+      last_failed: insert_last_failed,
+    },
+    _ => MessageBatchSummary {
+      count: keep_count,
+      last_role: keep_last_role,
+      last_tool_calls: keep_last_tool_calls,
+      last_failed: keep_last_failed,
+    },
+  }
+}
+
+pub fn complete_tool_changes(
+  source: String,
+  changed: Bool,
+  has_pending: Bool,
+  pending_had_changes: Bool,
+  keep_count: Int,
+  keep_last_role: String,
+  keep_last_tool_calls: Int,
+  keep_last_failed: Bool,
+  rewrite_count: Int,
+  rewrite_last_role: String,
+  rewrite_last_tool_calls: Int,
+  rewrite_last_failed: Bool,
+  insert_count: Int,
+  insert_last_role: String,
+  insert_last_tool_calls: Int,
+  insert_last_failed: Bool
+) -> String {
+  let action = tool_change_action(changed, has_pending, pending_had_changes);
+  let batch = select_tool_change_batch(
+    action,
+    keep_count,
+    keep_last_role,
+    keep_last_tool_calls,
+    keep_last_failed,
+    rewrite_count,
+    rewrite_last_role,
+    rewrite_last_tool_calls,
+    rewrite_last_failed,
+    insert_count,
+    insert_last_role,
+    insert_last_tool_calls,
+    insert_last_failed
+  );
+  json.encode(
+    type ToolChangePlan,
+    ToolChangePlan {
+      action: action,
+      state: observe_message_batch(
+        source,
+        batch.count,
+        batch.last_role,
+        batch.last_tool_calls,
+        batch.last_failed
+      ),
+    }
+  )
+}
+
+pub fn begin_with_tool_changes(
+  source: String,
+  resume: Bool,
+  changed: Bool,
+  has_pending: Bool,
+  pending_had_changes: Bool,
+  keep_count: Int,
+  keep_last_role: String,
+  keep_last_tool_calls: Int,
+  keep_last_failed: Bool,
+  rewrite_count: Int,
+  rewrite_last_role: String,
+  rewrite_last_tool_calls: Int,
+  rewrite_last_failed: Bool,
+  insert_count: Int,
+  insert_last_role: String,
+  insert_last_tool_calls: Int,
+  insert_last_failed: Bool
+) -> String {
+  let action = tool_change_action(changed, has_pending, pending_had_changes);
+  let batch = select_tool_change_batch(
+    action,
+    keep_count,
+    keep_last_role,
+    keep_last_tool_calls,
+    keep_last_failed,
+    rewrite_count,
+    rewrite_last_role,
+    rewrite_last_tool_calls,
+    rewrite_last_failed,
+    insert_count,
+    insert_last_role,
+    insert_last_tool_calls,
+    insert_last_failed
+  );
+  json.encode(
+    type ToolChangePlan,
+    ToolChangePlan {
+      action: action,
+      state: begin_with_messages(
+        source,
+        resume,
+        batch.count,
+        batch.last_role,
+        batch.last_tool_calls,
+        batch.last_failed
+      ),
+    }
+  )
+}
+
+pub fn begin_continue_with_tool_changes(
+  source: String,
+  resume: Bool,
+  total: Int,
+  system: Int,
+  tail_role: String,
+  steering: Int,
+  follow_up: Int,
+  steering_all: Bool,
+  follow_up_all: Bool,
+  changed: Bool,
+  has_pending: Bool,
+  pending_had_changes: Bool,
+  keep_count: Int,
+  keep_last_role: String,
+  keep_last_tool_calls: Int,
+  keep_last_failed: Bool,
+  rewrite_count: Int,
+  rewrite_last_role: String,
+  rewrite_last_tool_calls: Int,
+  rewrite_last_failed: Bool,
+  insert_count: Int,
+  insert_last_role: String,
+  insert_last_tool_calls: Int,
+  insert_last_failed: Bool
+) -> String {
+  let message_kind = classify_message_tail(total, system, tail_role);
+  let queue = select_queue(steering, follow_up);
+  let action = continue_action(message_kind, queue);
+  let tool_action = tool_change_action(changed, has_pending, pending_had_changes);
+  let batch = select_tool_change_batch(
+    tool_action,
+    keep_count,
+    keep_last_role,
+    keep_last_tool_calls,
+    keep_last_failed,
+    rewrite_count,
+    rewrite_last_role,
+    rewrite_last_tool_calls,
+    rewrite_last_failed,
+    insert_count,
+    insert_last_role,
+    insert_last_tool_calls,
+    insert_last_failed
+  );
+  json.encode(
+    type ContinueEntryPlan,
+    ContinueEntryPlan {
+      action: action,
+      queue: queue,
+      take: queue_take(
+        queue_available(queue, steering, follow_up),
+        queue_take_all(queue, steering_all, follow_up_all)
+      ),
+      tool_action: tool_action,
+      state: match action {
+        1 => begin_with_messages(
+          source,
+          resume,
+          batch.count,
+          batch.last_role,
+          batch.last_tool_calls,
+          batch.last_failed
+        ),
+        _ => "",
+      },
+    }
+  )
+}
+
+fn continuation_candidate(
+  candidates: ContinuationEntryCandidates,
+  action: Int
+) -> ToolChangeCandidate {
+  match action {
+    2 => candidates.steering,
+    3 => candidates.follow_up,
+    _ => candidates.direct,
+  }
+}
+
+fn continuation_enters(action: Int) -> Bool { policy.continuation_enters(action) }
+
+fn begin_continuation_with_candidates(
+  source: String,
+  resume: Bool,
+  total: Int,
+  system: Int,
+  tail_role: String,
+  steering: Int,
+  follow_up: Int,
+  steering_all: Bool,
+  follow_up_all: Bool,
+  candidates: ContinuationEntryCandidates
+) -> String {
+  let message_kind = classify_message_tail(total, system, tail_role);
+  let queue = select_queue(steering, follow_up);
+  let action = continue_action(message_kind, queue);
+  let candidate = continuation_candidate(candidates, action);
+  let tool_action = tool_change_action(
+    candidate.changed,
+    candidate.has_pending,
+    candidate.pending_had_changes
+  );
+  let batch = select_tool_change_batch(
+    tool_action,
+    candidate.keep.count,
+    candidate.keep.last_role,
+    candidate.keep.last_tool_calls,
+    candidate.keep.last_failed,
+    candidate.rewrite.count,
+    candidate.rewrite.last_role,
+    candidate.rewrite.last_tool_calls,
+    candidate.rewrite.last_failed,
+    candidate.insert.count,
+    candidate.insert.last_role,
+    candidate.insert.last_tool_calls,
+    candidate.insert.last_failed
+  );
+  json.encode(
+    type ContinueEntryPlan,
+    ContinueEntryPlan {
+      action: action,
+      queue: queue,
+      take: queue_take(
+        queue_available(queue, steering, follow_up),
+        queue_take_all(queue, steering_all, follow_up_all)
+      ),
+      tool_action: tool_action,
+      state: match continuation_enters(action) {
+        true => begin_with_messages(
+          source,
+          resume,
+          batch.count,
+          batch.last_role,
+          batch.last_tool_calls,
+          batch.last_failed
+        ),
+        _ => "",
+      },
+    }
+  )
+}
+
+pub fn begin_continuation_with_tool_changes(
+  source: String,
+  resume: Bool,
+  total: Int,
+  system: Int,
+  tail_role: String,
+  steering: Int,
+  follow_up: Int,
+  steering_all: Bool,
+  follow_up_all: Bool,
+  encoded_candidates: String
+) -> String {
+  match json.decode(type ContinuationEntryCandidates, encoded_candidates) {
+    Ok(candidates) => begin_continuation_with_candidates(
+      source,
+      resume,
+      total,
+      system,
+      tail_role,
+      steering,
+      follow_up,
+      steering_all,
+      follow_up_all,
+      candidates
+    ),
+    Err(error) => json.encode(
+      type ContinueEntryPlan,
+      ContinueEntryPlan {
+        action: 1,
+        queue: 0,
+        take: 0,
+        tool_action: 0,
+        state: invalid(error),
+      }
+    ),
+  }
+}
+
+fn fallback_model_summary(tool_calls: Int, failed: Bool) -> MessageSummary {
+  MessageSummary { role: "assistant", tool_calls: tool_calls, failed: failed }
+}
+
+fn observed_model_summary(state: Machine, tool_calls: Int, failed: Bool) -> MessageSummary {
+  match state.messages.last() {
+    Some(message) => match message.role {
+      "assistant" => message,
+      _ => fallback_model_summary(tool_calls, failed),
+    },
+    None => fallback_model_summary(tool_calls, failed),
+  }
+}
+
+fn complete_model(state: Machine, tool_calls: Int, failed: Bool) -> String {
+  let summary = observed_model_summary(state, tool_calls, failed);
+  match summary.failed {
+    true => machine(
+      4,
+      state.turn,
+      false,
+      4,
+      state.transition_count + 1,
+      state.message_count,
+      ["model"],
+      state.messages,
+      state.tool_batch,
+      state.queues
+    ),
+    _ => match summary.tool_calls {
+      0 => machine(
+        3,
+        state.turn,
+        false,
+        3,
+        state.transition_count + 1,
+        state.message_count,
+        ["model"],
+        state.messages,
+        state.tool_batch,
+        empty_queues()
+      ),
+      _ => machine(
+        2,
+        state.turn,
+        true,
+        2,
+        state.transition_count + 1,
+        state.message_count,
+        ["model"],
+        state.messages,
+        empty_tool_batch(),
+        empty_queues()
+      ),
+    },
+  }
+}
+
+pub fn model_completed(source: String, tool_calls: Int, failed: Bool) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.phase {
+      1 => complete_model(state, tool_calls, failed),
+      _ => invalid("model_completed requires the model phase"),
+    },
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn complete_model_turn(source: String, role: String, tool_calls: Int, failed: Bool) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.phase {
+      1 => complete_model(
+        Machine {
+          schema: state.schema,
+          phase: state.phase,
+          turn: state.turn,
+          must_continue: state.must_continue,
+          effect: state.effect,
+          error: state.error,
+          transition_count: state.transition_count,
+          message_count: state.message_count + 1,
+          history: state.history,
+          messages: [MessageSummary { role: role, tool_calls: tool_calls, failed: failed }],
+          tool_batch: state.tool_batch,
+          queues: state.queues,
+        },
+        tool_calls,
+        failed
+      ),
+      _ => invalid("complete_model_turn requires the model phase"),
+    },
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn complete_model_plan(
+  source: String,
+  role: String,
+  tool_calls: Int,
+  failed: Bool,
+  global_sequential: Bool,
+  has_sequential: Bool
+) -> String {
+  json.encode(
+    type ModelCompletionPlan,
+    ModelCompletionPlan {
+      state: complete_model_turn(source, role, tool_calls, failed),
+      run_tools_sequential: tools_run_sequential(global_sequential, has_sequential),
+    }
+  )
+}
+
+// Tool actions: 0=none, 1=reject truncated calls, 2=sequential,
+// 3=parallel.
+fn tool_execution_action(
+  tool_calls: Int,
+  failed: Bool,
+  truncated: Bool,
+  run_sequential: Bool
+) -> Int { policy.tool_execution_action(tool_calls, failed, truncated, run_sequential) }
+
+pub fn complete_model_execution_plan(
+  source: String,
+  role: String,
+  tool_calls: Int,
+  failed: Bool,
+  truncated: Bool,
+  global_sequential: Bool,
+  has_sequential: Bool
+) -> String {
+  let run_sequential = tools_run_sequential(global_sequential, has_sequential);
+  json.encode(
+    type ModelExecutionPlan,
+    ModelExecutionPlan {
+      state: complete_model_turn(source, role, tool_calls, failed),
+      tool_action: tool_execution_action(tool_calls, failed, truncated, run_sequential),
+    }
+  )
+}
+
+fn complete_tools(state: Machine, terminate: Bool) -> String {
+  let stops = match state.tool_batch.observed {
+    true => state.tool_batch.terminate,
+    _ => terminate,
+  };
+  match stops {
+    true => machine(
+      3,
+      state.turn,
+      false,
+      3,
+      state.transition_count + 1,
+      state.message_count,
+      ["tools"],
+      state.messages,
+      state.tool_batch,
+      empty_queues()
+    ),
+    _ => machine(
+      3,
+      state.turn,
+      true,
+      3,
+      state.transition_count + 1,
+      state.message_count,
+      ["tools"],
+      state.messages,
+      state.tool_batch,
+      empty_queues()
+    ),
+  }
+}
+
+pub fn tools_completed(source: String, terminate: Bool) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.phase {
+      2 => complete_tools(state, terminate),
+      _ => invalid("tools_completed requires the tools phase"),
+    },
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn complete_tool_turn(
+  source: String,
+  message_count: Int,
+  total: Int,
+  failed: Int,
+  terminate: Bool,
+  last_role: String,
+  last_failed: Bool
+) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.phase {
+      2 => complete_tools(
+        Machine {
+          schema: state.schema,
+          phase: state.phase,
+          turn: state.turn,
+          must_continue: state.must_continue,
+          effect: state.effect,
+          error: state.error,
+          transition_count: state.transition_count,
+          message_count: state.message_count + message_count,
+          history: state.history,
+          messages: match message_count {
+            0 => state.messages,
+            _ => [MessageSummary { role: last_role, tool_calls: 0, failed: last_failed }],
+          },
+          tool_batch: ToolBatchSummary {
+            observed: true,
+            total: total,
+            failed: failed,
+            terminate: terminate,
+          },
+          queues: state.queues,
+        },
+        terminate
+      ),
+      _ => invalid("complete_tool_turn requires the tools phase"),
+    },
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn complete_tool_outcomes(
+  source: String,
+  message_count: Int,
+  total: Int,
+  failed: Int,
+  terminating: Int,
+  last_role: String,
+  last_failed: Bool
+) -> String {
+  complete_tool_turn(
+    source,
+    message_count,
+    total,
+    failed,
+    tool_batch_terminates(total, terminating),
+    last_role,
+    last_failed
+  )
+}
+
+fn request_next(state: Machine) -> String {
+  machine(
+    1,
+    state.turn + 1,
+    false,
+    1,
+    state.transition_count + 1,
+    state.message_count,
+    ["queues"],
+    state.messages,
+    state.tool_batch,
+    empty_queues()
+  )
+}
+
+fn after_follow_up(state: Machine, follow_up_messages: Int, force_continue: Bool) -> String {
+  match follow_up_messages {
+    0 => match force_continue {
+      true => request_next(state),
+      _ => machine(
+        4,
+        state.turn,
+        false,
+        4,
+        state.transition_count + 1,
+        state.message_count,
+        ["queues"],
+        state.messages,
+        state.tool_batch,
+        state.queues
+      ),
+    },
+    _ => request_next(state),
+  }
+}
+
+fn after_natural_request(state: Machine, follow_up_messages: Int, force_continue: Bool) -> String {
+  match state.must_continue {
+    true => request_next(state),
+    _ => after_follow_up(state, follow_up_messages, force_continue),
+  }
+}
+
+fn complete_queues(
+  state: Machine,
+  steering_messages: Int,
+  follow_up_messages: Int,
+  force_continue: Bool,
+  force_end: Bool
+) -> String {
+  match force_end {
+    true => machine(
+      4,
+      state.turn,
+      false,
+      4,
+      state.transition_count + 1,
+      state.message_count,
+      ["queues"],
+      state.messages,
+      state.tool_batch,
+      state.queues
+    ),
+    _ => match steering_messages {
+      0 => after_natural_request(state, follow_up_messages, force_continue),
+      _ => request_next(state),
+    },
+  }
+}
+
+fn complete_observed_queues(
+  state: Machine,
+  steering_messages: Int,
+  follow_up_messages: Int,
+  force_continue: Bool,
+  force_end: Bool
+) -> String {
+  match state.queues.observed {
+    true => complete_queues(
+      state,
+      state.queues.steering,
+      state.queues.follow_up,
+      state.queues.force_continue,
+      state.queues.force_end
+    ),
+    _ => complete_queues(state, steering_messages, follow_up_messages, force_continue, force_end),
+  }
+}
+
+pub fn queues_completed(
+  source: String,
+  steering_messages: Int,
+  follow_up_messages: Int,
+  force_continue: Bool,
+  force_end: Bool
+) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.phase {
+      3 => complete_observed_queues(
+        state,
+        steering_messages,
+        follow_up_messages,
+        force_continue,
+        force_end
+      ),
+      _ => invalid("queues_completed requires the queues phase"),
+    },
+    Err(error) => invalid(error),
+  }
+}
+
+pub fn complete_queue_plan(
+  source: String,
+  steering_messages: Int,
+  follow_up_messages: Int,
+  force_continue: Bool,
+  force_end: Bool
+) -> String {
+  json.encode(
+    type QueueCompletion,
+    QueueCompletion {
+      queue: select_queue(steering_messages, follow_up_messages),
+      state: match json.decode(type Machine, source) {
+        Ok(state) => match state.phase {
+          3 => complete_queues(
+            Machine {
+              schema: state.schema,
+              phase: state.phase,
+              turn: state.turn,
+              must_continue: state.must_continue,
+              effect: state.effect,
+              error: state.error,
+              transition_count: state.transition_count,
+              message_count: state.message_count,
+              history: state.history,
+              messages: state.messages,
+              tool_batch: state.tool_batch,
+              queues: QueueSummary {
+                observed: true,
+                steering: steering_messages,
+                follow_up: follow_up_messages,
+                force_continue: force_continue,
+                force_end: force_end,
+              },
+            },
+            steering_messages,
+            follow_up_messages,
+            force_continue,
+            force_end
+          ),
+          _ => invalid("complete_queue_plan requires the queues phase"),
+        },
+        Err(error) => invalid(error),
+      },
+    }
+  )
+}
+
+pub fn queue_poll_plan(
+  source: String,
+  steering_messages: Int,
+  force_continue: Bool,
+  force_end: Bool
+) -> String {
+  match json.decode(type Machine, source) {
+    Ok(state) => match state.phase {
+      3 => match should_poll_follow_up(state.must_continue, steering_messages, force_end) {
+        true => json.encode(
+          type QueuePollPlan,
+          QueuePollPlan { poll_follow_up: true, completion: "" }
+        ),
+        _ => json.encode(
+          type QueuePollPlan,
+          QueuePollPlan {
+            poll_follow_up: false,
+            completion: complete_queue_plan(
+              source,
+              steering_messages,
+              0,
+              force_continue,
+              force_end
+            ),
+          }
+        ),
+      },
+      _ => json.encode(
+        type QueuePollPlan,
+        QueuePollPlan {
+          poll_follow_up: false,
+          completion: complete_queue_plan(source, steering_messages, 0, force_continue, force_end),
+        }
+      ),
+    },
+    Err(_) => json.encode(
+      type QueuePollPlan,
+      QueuePollPlan {
+        poll_follow_up: false,
+        completion: complete_queue_plan(source, steering_messages, 0, force_continue, force_end),
+      }
+    ),
+  }
+}
+
+pub fn complete_queue_drain_plan(
+  source: String,
+  steering: Int,
+  follow_up: Int,
+  steering_all: Bool,
+  follow_up_all: Bool,
+  force_continue: Bool,
+  force_end: Bool
+) -> String {
+  let available_follow_up = match json.decode(type Machine, source) {
+    Ok(state) => match state.must_continue { true => 0, _ => follow_up },
+    Err(_) => 0,
+  };
+  let queue = match force_end {
+    true => 0,
+    _ => select_queue(steering, available_follow_up),
+  };
+  let take = queue_take(
+    queue_available(queue, steering, follow_up),
+    queue_take_all(queue, steering_all, follow_up_all)
+  );
+  json.encode(
+    type QueueDrainPlan,
+    QueueDrainPlan {
+      queue: queue,
+      take: take,
+      state: match json.decode(
+        type QueueCompletion,
+        complete_queue_plan(
+          source,
+          match queue { 1 => take, _ => 0 },
+          match queue { 2 => take, _ => 0 },
+          force_continue,
+          force_end
+        )
+      ) {
+        Ok(completion) => completion.state,
+        Err(error) => invalid(error),
+      },
+    }
+  )
+}

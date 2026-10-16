@@ -1,0 +1,11 @@
+[package]
+name = "oche-codegen"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+snafu.workspace = true
+oche-comptime = { path = "../comptime" }
+oche-frontend = { path = "../frontend" }
+oche-hir = { path = "../hir" }

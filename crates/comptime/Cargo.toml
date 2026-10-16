@@ -1,0 +1,9 @@
+[package]
+name = "oche-comptime"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+snafu.workspace = true
+oche-frontend = { path = "../frontend" }

@@ -1,0 +1,22 @@
+[package]
+name = "oche-dart-vm"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+snafu.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lib]
+name = "dart_vm_binding"
+
+[[example]]
+name = "kernel_probe"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "oche_module_probe"
+crate-type = ["cdylib"]

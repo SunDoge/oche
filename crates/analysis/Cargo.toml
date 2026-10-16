@@ -1,0 +1,10 @@
+[package]
+name = "oche-analysis"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+oche-comptime = { path = "../comptime" }
+oche-frontend = { path = "../frontend" }
+oche-hir = { path = "../hir" }

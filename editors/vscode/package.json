@@ -1,0 +1,41 @@
+{
+  "name": "oche-language",
+  "displayName": "Oche",
+  "description": "Syntax highlighting and language-server support for Oche",
+  "version": "0.1.0",
+  "private": true,
+  "engines": { "vscode": "^1.95.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:oche"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "oche",
+        "aliases": ["Oche", "oche"],
+        "extensions": [".oche"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "oche",
+        "scopeName": "source.oche",
+        "path": "./syntaxes/oche.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Oche",
+      "properties": {
+        "oche.serverPath": {
+          "type": "string",
+          "default": "oche",
+          "description": "Path to the Oche CLI binary used for `oche lsp`."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

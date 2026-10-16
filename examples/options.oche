@@ -1,0 +1,24 @@
+// Option and Result are non-nullable tagged values lowered to sealed Dart types.
+fn some(value: Int) -> Option<Int> { Some(value) }
+
+fn none() -> Option<Int> { None }
+
+fn unwrap_or_zero(value: Option<Int>) -> Int {
+  match value {
+    Some(inner) => inner,
+    None => 0,
+  }
+}
+
+fn round_trip(value: Int) -> Int { unwrap_or_zero(some(value)) }
+
+fn ok(value: Int) -> Result<Int, String> { Ok(value) }
+
+fn error(message: String) -> Result<Int, String> { Err(message) }
+
+fn result_or_zero(value: Result<Int, String>) -> Int {
+  match value {
+    Ok(inner) => inner,
+    Err(_) => 0,
+  }
+}

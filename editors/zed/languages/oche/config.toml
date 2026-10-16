@@ -1,0 +1,6 @@
+name = "Oche"
+grammar = "oche"
+path_suffixes = ["oche"]
+line_comments = ["// "]
+tab_size = 2
+hard_tabs = false

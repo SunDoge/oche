@@ -1,0 +1,9 @@
+[package]
+name = "oche-formatter"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+pretty.workspace = true
+oche-frontend = { path = "../frontend" }

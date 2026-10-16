@@ -1,0 +1,20 @@
+fn selected(value: Int) -> Bool {
+  match value {
+    1 => true,
+    _ => false,
+  }
+}
+
+fn choose(value: Option<Int>) -> Int {
+  match value {
+    Some(inner) if selected(inner) => inner + 10,
+    Some(_) => 0,
+    None => -1,
+  }
+}
+
+fn guarded() -> Int { choose(Some(1)) }
+
+fn fallback() -> Int { choose(Some(2)) }
+
+fn absent() -> Int { choose(None) }

@@ -1,0 +1,5 @@
+fn add(left: Int, right: Int) -> Int { left + right }
+
+test fn addition() -> Bool { match add(20, 22) { 42 => true, _ => false } }
+
+test async fn async_code() -> Bool { true }

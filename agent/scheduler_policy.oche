@@ -1,0 +1,129 @@
+// Pure pi scheduling decisions. The stateful machine remains in pi_core.oche;
+// this module is intentionally limited to the shared core-type module ABI.
+
+// Continue kinds: 0=empty/system-only, 1=assistant tail, 2=continuable tail.
+pub fn classify_message_tail(total: Int, system: Int, tail_role: String) -> Int {
+  match total - system {
+    0 => 0,
+    _ => match tail_role {
+      "assistant" => 1,
+      _ => 2,
+    },
+  }
+}
+
+pub fn tool_batch_terminates(total: Int, terminating: Int) -> Bool {
+  match total {
+    0 => false,
+    _ => match total - terminating {
+      0 => true,
+      _ => false,
+    },
+  }
+}
+
+pub fn queue_take(available: Int, take_all: Bool) -> Int {
+  match available {
+    0 => 0,
+    _ => match take_all {
+      true => available,
+      _ => 1,
+    },
+  }
+}
+
+pub fn tools_run_sequential(global_sequential: Bool, has_sequential: Bool) -> Bool {
+  match global_sequential {
+    true => true,
+    _ => match has_sequential {
+      true => true,
+      _ => false,
+    },
+  }
+}
+
+// Queues: 0=none, 1=steering, 2=follow-up.
+pub fn select_queue(steering: Int, follow_up: Int) -> Int {
+  match steering {
+    0 => match follow_up {
+      0 => 0,
+      _ => 2,
+    },
+    _ => 1,
+  }
+}
+
+// Actions: 0=no messages, 1=continue context, 2=steering, 3=follow-up,
+// 4=assistant tail without queued input.
+pub fn continue_action(message_kind: Int, queue: Int) -> Int {
+  match message_kind {
+    0 => 0,
+    1 => match queue {
+      1 => 2,
+      2 => 3,
+      _ => 4,
+    },
+    _ => 1,
+  }
+}
+
+pub fn queue_available(queue: Int, steering: Int, follow_up: Int) -> Int {
+  match queue { 1 => steering, 2 => follow_up, _ => 0 }
+}
+
+pub fn queue_take_all(queue: Int, steering_all: Bool, follow_up_all: Bool) -> Bool {
+  match queue { 1 => steering_all, 2 => follow_up_all, _ => false }
+}
+
+pub fn should_poll_follow_up(natural_continue: Bool, steering: Int, force_end: Bool) -> Bool {
+  match force_end {
+    true => false,
+    _ => match natural_continue {
+      true => false,
+      _ => match steering {
+        0 => true,
+        _ => false,
+      },
+    },
+  }
+}
+
+// Tool-change actions: 0=keep, 1=rewrite pending, 2=insert declaration.
+pub fn tool_change_action(changed: Bool, has_pending: Bool, pending_had_changes: Bool) -> Int {
+  match has_pending {
+    true => match changed {
+      true => 1,
+      _ => match pending_had_changes {
+        true => 1,
+        _ => 0,
+      },
+    },
+    _ => match changed {
+      true => 2,
+      _ => 0,
+    },
+  }
+}
+
+// Tool actions: 0=none, 1=reject truncated, 2=sequential, 3=parallel.
+pub fn tool_execution_action(
+  tool_calls: Int,
+  failed: Bool,
+  truncated: Bool,
+  run_sequential: Bool
+) -> Int {
+  match failed {
+    true => 0,
+    _ => match tool_calls {
+      0 => 0,
+      _ => match truncated {
+        true => 1,
+        _ => match run_sequential { true => 2, _ => 3 },
+      },
+    },
+  }
+}
+
+pub fn continuation_enters(action: Int) -> Bool {
+  match action { 1 => true, 2 => true, 3 => true, _ => false }
+}

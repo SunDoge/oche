@@ -1,0 +1,8 @@
+[package]
+name = "oche-frontend"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+snafu.workspace = true

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Oche",
+  "scopeName": "source.oche",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#functions" },
+    { "include": "#types" },
+    { "include": "#constructors" },
+    { "include": "#keywords" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.oche", "match": "//.*$" }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.oche",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        { "name": "constant.character.escape.oche", "match": "\\\\[\\\"\\\\nrt]" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.integer.oche", "match": "\\b[0-9]+\\b" }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.oche" },
+            "2": { "name": "entity.name.function.oche" }
+          }
+        },
+        {
+          "name": "entity.name.function.call.oche",
+          "match": "\\b[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "support.type.primitive.oche", "match": "\\b(?:Int|Float|Bool|String|Future|Option|Result)\\b" },
+        { "name": "entity.name.type.oche", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" }
+      ]
+    },
+    "constructors": {
+      "patterns": [
+        { "name": "support.function.variant.oche", "match": "\\b(?:Some|None|Ok|Err)\\b" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "keyword.control.oche", "match": "\\b(?:match|try|if|else|for|while|return)\\b" },
+        { "name": "storage.modifier.oche", "match": "\\b(?:comptime|const|test|async|await|let|mut|struct|enum|pub|import|dart|as)\\b" },
+        { "name": "keyword.operator.propagation.oche", "match": "\\?" },
+        { "name": "constant.language.boolean.oche", "match": "\\b(?:true|false)\\b" }
+      ]
+    }
+  }
+}

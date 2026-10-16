@@ -1,0 +1,24 @@
+const fn generate_answer(target: Type) -> ComptimeDeclarations {
+  ComptimeDeclarations {
+    functions: [
+      ComptimeFunction {
+        name: "generated_answer",
+        parameters: [],
+        result: target,
+        expressions: [
+          ComptimeExpression {
+            kind: "int",
+            text: "42",
+            ty: target,
+            children: [],
+          }
+        ],
+        root: 0,
+      }
+    ],
+  }
+}
+
+comptime generate_answer(Int)
+
+fn use_generated() -> Int { generated_answer() }

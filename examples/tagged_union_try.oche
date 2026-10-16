@@ -1,0 +1,84 @@
+enum Message {
+  Text(String),
+  Number(Int),
+  Stop,
+}
+
+enum Box<T> {
+  Value(T),
+  Empty,
+}
+
+fn positive(value: Int) -> Result<Int, String> {
+  match value {
+    0 => Err("zero is not positive"),
+    _ => Ok(value),
+  }
+}
+
+fn add_positive(left: Int, right: Int) -> Result<Int, String> {
+  try {
+    let a = positive(left)?;
+    let b = positive(right)?;
+    a + b
+  }
+}
+
+fn propagate(value: Int) -> Result<Int, String> { Ok(positive(value)? + 1) }
+
+fn present(value: Int) -> Option<Int> {
+  match value {
+    0 => None,
+    _ => Some(value),
+  }
+}
+
+fn add_present(left: Int, right: Int) -> Option<Int> {
+  try {
+    let a = present(left)?;
+    let b = present(right)?;
+    a + b
+  }
+}
+
+fn add_positive_value(left: Int, right: Int) -> Int {
+  match add_positive(left, right) {
+    Ok(value) => value,
+    Err(_) => -1,
+  }
+}
+
+fn add_present_value(left: Int, right: Int) -> Int {
+  match add_present(left, right) {
+    Some(value) => value,
+    None => -1,
+  }
+}
+
+fn destructure() -> Int {
+  let Ok(value) = positive(2);
+  value
+}
+
+fn render(message: Message) -> String {
+  match message {
+    Text(value) => value,
+    Number(_) => "number",
+    Stop => "stopped",
+  }
+}
+
+fn render_text(value: String) -> String { render(Text(value)) }
+
+fn render_number(value: Int) -> String { render(Number(value)) }
+
+fn render_stop() -> String { render(Stop()) }
+
+fn unbox(value: Box<Int>) -> Int {
+  match value {
+    Value(inner) => inner,
+    Empty => -1,
+  }
+}
+
+fn boxed(value: Int) -> Int { unbox(Value(value)) }
