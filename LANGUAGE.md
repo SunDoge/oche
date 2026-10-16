@@ -49,11 +49,14 @@ constraint on the language model.
 - `value |> transform(argument)` inserts `value` as the first call argument. The
   right side must be a call, may be module-qualified, and pipe has lower
   precedence than arithmetic operators.
-- `quote { expression }` creates a local compile-time code value and `splice`
+- `quote! { expression }` creates a local compile-time code value and `splice!(...)`
   inserts it before name resolution and type checking. A quote may be consumed
-  directly or bound with immutable `let`: `let code = quote { value + 1 };
-  splice code`. Ordinary identifiers inside it resolve at the splice site. Code
-  values never reach Dart and cannot yet cross a function boundary.
+  directly or bound with immutable `let`: `let code = quote! { value + 1 };
+  splice!(code)`. Ordinary identifiers inside it resolve at the splice site. Code
+  values never reach Dart and cannot yet cross a function boundary. `quote` and
+  `splice` are ordinary identifiers; a trailing `!` after a name in expression
+  position is the reserved compiler-form syntax class, and `quote!`/`splice!`
+  are its only defined members in 0.1.
 - Tests use the single canonical form `test [async] fn`; `test` is always a
   prefix modifier.
 
@@ -119,7 +122,7 @@ for implementation work:
   unmangled symbol names;
 - compiler-owned derivations may synthesize typed helpers for standard-library
   features such as JSON, but 0.1 exposes no general comptime or macro system;
-- `quote` and `splice` may construct and locally reuse expression AST before
+- `quote!` and `splice!` may construct and locally reuse expression AST before
   checking; code values cannot generate declarations, cross a function
   boundary, enter runtime data, or execute user code;
 - tests are parameterless `test fn` or `test async fn` declarations returning
@@ -172,7 +175,7 @@ General staged evaluation must define typing phases, capabilities, budgets,
 caching, reproducibility, source mapping, and LSP execution before it can become
 public syntax.
 
-The bounded `quote`/`splice` form stops before staged evaluation. It parses an
+The bounded `quote!`/`splice!` form stops before staged evaluation. It parses an
 expression into the existing AST and removes the generation boundary before
 module linking. An immutable local may hold that frontend-only code value and
 splice it more than once within its lexical scope. Quoted identifiers use the
@@ -212,7 +215,7 @@ target-specific branch of its type or control-flow semantics.
 | `let` | inferred Dart `final` local |
 | `let mut` | inferred Dart `var` local of the checked Oche type |
 | `try` and `?` | private typed propagation sentinel caught at the Oche boundary |
-| `splice quote { expression }` | the checked Dart expression produced by the ordinary lowering |
+| `splice!(quote! { expression })` | the checked Dart expression produced by the ordinary lowering |
 | native C ABI declaration | typed `dart:ffi` lookup or native-asset binding |
 
 The executable mapping suite exercises these representations through both

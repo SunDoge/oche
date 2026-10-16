@@ -17,6 +17,7 @@ enum Kind {
     Dot,
     DotDot,
     Question,
+    Bang,
     Hash,
 }
 
@@ -121,6 +122,7 @@ fn lex(source: &str) -> Vec<Token> {
                     b'+' | b'-' | b'*' | b'=' => (1, Kind::Operator),
                     b'.' => (1, Kind::Dot),
                     b'?' => (1, Kind::Question),
+                    b'!' => (1, Kind::Bang),
                     b'#' => (1, Kind::Hash),
                     _ => unreachable!("the frontend accepted an unknown token"),
                 },
@@ -277,7 +279,7 @@ fn render_item(item: &Item) -> (Doc, Class, Option<&Token>) {
             let class = match token.kind {
                 Kind::Operator => Class::Operator,
                 Kind::Dot | Kind::DotDot => Class::Dot,
-                Kind::Question => Class::Suffix,
+                Kind::Question | Kind::Bang => Class::Suffix,
                 Kind::Hash => Class::Prefix,
                 Kind::Atom => Class::Atom,
                 _ => unreachable!(),
@@ -317,7 +319,7 @@ fn render_item(item: &Item) -> (Doc, Class, Option<&Token>) {
 fn needs_space(left: Class, right: Class) -> bool {
     match (left, right) {
         (Class::Dot | Class::Prefix, _) | (_, Class::Dot | Class::Suffix) => false,
-        (Class::Atom, Class::Group('(' | '<')) => false,
+        (Class::Atom | Class::Suffix, Class::Group('(' | '<')) => false,
         (_, Class::Group('{')) => true,
         (Class::Operator, _) | (_, Class::Operator) => true,
         _ => true,

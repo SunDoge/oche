@@ -90,7 +90,12 @@ impl<R: Read, W: Write> Server<R, W> {
                             "capabilities": {
                                 "textDocumentSync": {"openClose": true, "change": 1},
                                 "hoverProvider": true,
-                                "documentFormattingProvider": true
+                                "documentFormattingProvider": true,
+                                "documentSymbolProvider": true,
+                                "foldingRangeProvider": true,
+                                "definitionProvider": true,
+                                "referencesProvider": true,
+                                "documentHighlightProvider": true
                             },
                             "serverInfo": {"name": "oche", "version": env!("CARGO_PKG_VERSION")}
                         }),
@@ -140,6 +145,31 @@ impl<R: Read, W: Write> Server<R, W> {
                 if let Some(request) = request {
                     let result = self.hover(&params);
                     self.respond(request, result)?;
+                }
+            }
+            "textDocument/documentSymbol" => {
+                if let Some(request) = request {
+                    self.respond(request, self.document_symbols(&params))?;
+                }
+            }
+            "textDocument/foldingRange" => {
+                if let Some(request) = request {
+                    self.respond(request, self.folding_ranges(&params))?;
+                }
+            }
+            "textDocument/definition" => {
+                if let Some(request) = request {
+                    self.respond(request, self.definition(&params))?;
+                }
+            }
+            "textDocument/references" => {
+                if let Some(request) = request {
+                    self.respond(request, self.references(&params))?;
+                }
+            }
+            "textDocument/documentHighlight" => {
+                if let Some(request) = request {
+                    self.respond(request, self.document_highlight(&params))?;
                 }
             }
             "textDocument/formatting" => {
@@ -349,7 +379,7 @@ impl<R: Read, W: Write> Server<R, W> {
             "comptime" => "Evaluate this expression or declaration during compilation.",
             "const" => "Mark a function as eligible for compile-time evaluation.",
             "splice" => "Insert a directly quoted expression before type checking.",
-            "quote" => "Build a compile-time expression for direct or local 'splice' use.",
+            "quote" => "Build a compile-time expression for direct or local 'splice!' use.",
             "match" => "Pattern-matching expression.",
             "if" => "Restrict a match arm with a Bool guard.",
             "enum" => "A tagged union lowered to a sealed Dart class family.",
@@ -394,6 +424,329 @@ impl<R: Read, W: Write> Server<R, W> {
             },
             "newText": formatted
         }])
+    }
+
+    fn document_symbols(&self, params: &Value) -> Value {
+        let Some(uri) = params.pointer("/textDocument/uri").and_then(Value::as_str) else {
+            return Value::Null;
+        };
+        let Some(file) = self.documents.get(uri).copied() else {
+            return Value::Null;
+        };
+        let Some(source) = self.analysis.file(file).map(|file| file.text.clone()) else {
+            return Value::Null;
+        };
+        let Some(program) = self.analysis.parse(file).and_then(|snapshot| snapshot.program) else {
+            return Value::Null;
+        };
+        let mut symbols = Vec::new();
+        for function in &program.functions {
+            let Some(span) = find_ident(&source, function.span.start, &function.name) else {
+                continue;
+            };
+            let parameters = function
+                .parameters
+                .iter()
+                .map(|parameter| format!("{}: {}", parameter.name, parameter.ty))
+                .collect::<Vec<_>>()
+                .join(", ");
+            symbols.push(json!({
+                "name": function.name,
+                "detail": format!("fn {}({parameters}) -> {}", function.name, function.result),
+                "kind": SYMBOL_FUNCTION,
+                "range": range_json(&source, function.span),
+                "selectionRange": range_json(&source, span),
+            }));
+        }
+        for structure in &program.structs {
+            let Some(span) = find_ident(&source, structure.span.start, &structure.name) else {
+                continue;
+            };
+            let fields = structure
+                .fields
+                .iter()
+                .filter_map(|field| {
+                    let span = find_ident(&source, field.span.start, &field.name)?;
+                    Some(json!({
+                        "name": field.name,
+                        "detail": field.ty.to_string(),
+                        "kind": SYMBOL_FIELD,
+                        "range": range_json(&source, field.span),
+                        "selectionRange": range_json(&source, span),
+                    }))
+                })
+                .collect::<Vec<_>>();
+            symbols.push(json!({
+                "name": structure.name,
+                "kind": SYMBOL_STRUCT,
+                "range": range_json(&source, structure.span),
+                "selectionRange": range_json(&source, span),
+                "children": fields,
+            }));
+        }
+        for enumeration in &program.enums {
+            let Some(declaration) = enumeration.span else {
+                continue;
+            };
+            let Some(span) = find_ident(&source, declaration.start, &enumeration.name) else {
+                continue;
+            };
+            let variants = enumeration
+                .variants
+                .iter()
+                .filter_map(|variant| {
+                    let span = variant
+                        .span
+                        .and_then(|span| find_ident(&source, span.start, &variant.name))?;
+                    Some(json!({
+                        "name": variant.name,
+                        "kind": SYMBOL_ENUM_MEMBER,
+                        "range": range_json(&source, span),
+                        "selectionRange": range_json(&source, span),
+                    }))
+                })
+                .collect::<Vec<_>>();
+            symbols.push(json!({
+                "name": enumeration.name,
+                "kind": SYMBOL_ENUM,
+                "range": range_json(&source, declaration),
+                "selectionRange": range_json(&source, span),
+                "children": variants,
+            }));
+        }
+        json!(symbols)
+    }
+
+    fn folding_ranges(&self, params: &Value) -> Value {
+        let Some(uri) = params.pointer("/textDocument/uri").and_then(Value::as_str) else {
+            return Value::Null;
+        };
+        let Some(file) = self.documents.get(uri).copied() else {
+            return Value::Null;
+        };
+        let Some(source) = self.analysis.file(file).map(|file| file.text.clone()) else {
+            return Value::Null;
+        };
+        let mut ranges = Vec::new();
+        let mut comment_run: Option<(usize, usize)> = None;
+        for (index, line) in source.split('\n').enumerate() {
+            if line.trim_start().starts_with("//") {
+                match &mut comment_run {
+                    Some((_, end)) => *end = index,
+                    None => comment_run = Some((index, index)),
+                }
+            } else if let Some((start, end)) = comment_run.take() {
+                if end > start {
+                    ranges.push(json!({"startLine": start, "endLine": end, "kind": "comment"}));
+                }
+            }
+        }
+        if let Some((start, end)) = comment_run {
+            if end > start {
+                ranges.push(json!({"startLine": start, "endLine": end, "kind": "comment"}));
+            }
+        }
+        for (open, close) in brace_pairs(&source) {
+            let open_line = line_of(&source, open);
+            let close_line = line_of(&source, close);
+            if close_line > open_line + 1 {
+                ranges.push(json!({"startLine": open_line + 1, "endLine": close_line}));
+            }
+        }
+        json!(ranges)
+    }
+
+    fn definition(&self, params: &Value) -> Value {
+        let Some(uri) = params.pointer("/textDocument/uri").and_then(Value::as_str) else {
+            return Value::Null;
+        };
+        let Some(file) = self.documents.get(uri).copied() else {
+            return Value::Null;
+        };
+        let source = match self.analysis.file(file) {
+            Some(file) => file.text.clone(),
+            None => return Value::Null,
+        };
+        let Some((line, character)) = position_params(&params) else {
+            return Value::Null;
+        };
+        let Some(offset) = position_to_offset(&source, line, character) else {
+            return Value::Null;
+        };
+        let Some((word, word_start)) = word_and_offset(&source, offset) else {
+            return Value::Null;
+        };
+        let Some(program) = self.analysis.parse(file).and_then(|snapshot| snapshot.program) else {
+            return Value::Null;
+        };
+        // A qualified reference `alias.name` resolves into the imported module.
+        if let Some(alias) = preceding_qualifier(&source, word_start) {
+            let Some(import) = program.imports.iter().find(|import| import.alias == alias) else {
+                return Value::Null;
+            };
+            if is_standard_import(&import.path) {
+                return Value::Null;
+            }
+            let Some(imported_uri) = resolve_import_uri(uri, &import.path) else {
+                return Value::Null;
+            };
+            let Some(imported) = self.read_source(&imported_uri) else {
+                return Value::Null;
+            };
+            if import.path.ends_with(".d.oche") {
+                return json!([location_json(
+                    &imported_uri,
+                    json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}})
+                )]);
+            }
+            let Some(declaration) = find_declaration(&imported, &imported_uri, word) else {
+                return Value::Null;
+            };
+            return json!([declaration]);
+        }
+        // Clicking an import alias jumps into the imported module.
+        if let Some(import) = program.imports.iter().find(|import| import.alias == word) {
+            if !is_standard_import(&import.path) {
+                if let Some(imported_uri) = resolve_import_uri(uri, &import.path) {
+                    if self.read_source(&imported_uri).is_some() {
+                        return json!([location_json(
+                            &imported_uri,
+                            json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}})
+                        )]);
+                    }
+                }
+            }
+            return Value::Null;
+        }
+        if let Some(declaration) = find_declaration(&source, uri, word) {
+            return json!([declaration]);
+        }
+        // Locals: parameters and `let` bindings of the enclosing function.
+        let Some(function) = program
+            .functions
+            .iter()
+            .find(|function| function.span.start <= offset && offset <= function.span.end)
+        else {
+            return Value::Null;
+        };
+        if function.parameters.iter().any(|parameter| parameter.name == word) {
+            if let Some(span) = find_ident(&source, function.span.start, word) {
+                return json!([location_json(uri, range_json(&source, span))]);
+            }
+        }
+        let base = function.span.start;
+        let region = &source[base..offset];
+        let mut binding = None;
+        let mut at = 0;
+        while let Some(found) = region[at..].find("let ") {
+            let mut ident = at + found + 4;
+            if region[ident..].starts_with("mut ") {
+                ident += 4;
+            }
+            let rest = &region[ident..];
+            if rest.starts_with(word)
+                && rest
+                    .as_bytes()
+                    .get(word.len())
+                    .map_or(true, |byte| !is_word_byte(*byte))
+            {
+                binding = Some(base + ident);
+            }
+            at = at + found + 4;
+        }
+        if let Some(start) = binding {
+            return json!([location_json(
+                uri,
+                range_json(
+                    &source,
+                    oche_frontend::SourceSpan {
+                        start,
+                        end: start + word.len(),
+                    },
+                ),
+            )]);
+        }
+        Value::Null
+    }
+
+    fn references(&self, params: &Value) -> Value {
+        let Some(uri) = params.pointer("/textDocument/uri").and_then(Value::as_str) else {
+            return Value::Null;
+        };
+        let Some(file) = self.documents.get(uri).copied() else {
+            return Value::Null;
+        };
+        let Some(source) = self.analysis.file(file).map(|file| file.text.clone()) else {
+            return Value::Null;
+        };
+        let Some((line, character)) = position_params(&params) else {
+            return Value::Null;
+        };
+        let Some(offset) = position_to_offset(&source, line, character) else {
+            return Value::Null;
+        };
+        let Some((word, _)) = word_and_offset(&source, offset) else {
+            return Value::Null;
+        };
+        let include_declaration = params
+            .pointer("/includeDeclaration")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let mut locations = Vec::new();
+        for (document_uri, document_file) in &self.documents {
+            let Some(text) = self
+                .analysis
+                .file(*document_file)
+                .map(|document| document.text.clone())
+            else {
+                continue;
+            };
+            for span in identifier_spans(&text, word) {
+                if !include_declaration && is_declaration_position(&text, span.start) {
+                    continue;
+                }
+                locations.push(location_json(document_uri, range_json(&text, span)));
+            }
+        }
+        json!(locations)
+    }
+
+    fn document_highlight(&self, params: &Value) -> Value {
+        let Some(uri) = params.pointer("/textDocument/uri").and_then(Value::as_str) else {
+            return Value::Null;
+        };
+        let Some(file) = self.documents.get(uri).copied() else {
+            return Value::Null;
+        };
+        let Some(source) = self.analysis.file(file).map(|file| file.text.clone()) else {
+            return Value::Null;
+        };
+        let Some((line, character)) = position_params(&params) else {
+            return Value::Null;
+        };
+        let Some(offset) = position_to_offset(&source, line, character) else {
+            return Value::Null;
+        };
+        let Some((word, _)) = word_and_offset(&source, offset) else {
+            return Value::Null;
+        };
+        let highlights = identifier_spans(&source, word)
+            .into_iter()
+            .map(|span| {
+                json!({
+                    "range": range_json(&source, span),
+                    "kind": 1,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!(highlights)
+    }
+
+    fn read_source(&self, uri: &str) -> Option<String> {
+        if let Some(file) = self.analysis.file_by_name(uri) {
+            return self.analysis.file(file).map(|file| file.text.clone());
+        }
+        std::fs::read_to_string(file_uri_path(uri)?).ok()
     }
 }
 
@@ -757,6 +1110,186 @@ fn word_at(source: &str, offset: usize) -> Option<&str> {
     (start < end).then_some(&source[start..end])
 }
 
+const SYMBOL_FUNCTION: u32 = 12;
+const SYMBOL_STRUCT: u32 = 23;
+const SYMBOL_ENUM: u32 = 10;
+const SYMBOL_ENUM_MEMBER: u32 = 22;
+const SYMBOL_FIELD: u32 = 8;
+
+fn word_and_offset(source: &str, offset: usize) -> Option<(&str, usize)> {
+    let word = word_at(source, offset)?;
+    let start = word.as_ptr() as usize - source.as_ptr() as usize;
+    Some((word, start))
+}
+
+fn position_params(params: &Value) -> Option<(usize, usize)> {
+    let line = params.pointer("/position/line").and_then(Value::as_u64)?;
+    let character = params
+        .pointer("/position/character")
+        .and_then(Value::as_u64)?;
+    Some((line as usize, character as usize))
+}
+
+fn range_json(source: &str, span: oche_frontend::SourceSpan) -> Value {
+    json!({
+        "start": offset_to_position(source, span.start),
+        "end": offset_to_position(source, span.end),
+    })
+}
+
+fn location_json(uri: &str, range: Value) -> Value {
+    json!({"uri": uri, "range": range})
+}
+
+fn line_of(source: &str, offset: usize) -> usize {
+    source[..offset.min(source.len())]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+}
+
+fn is_word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn find_ident(
+    source: &str,
+    from: usize,
+    name: &str,
+) -> Option<oche_frontend::SourceSpan> {
+    let bytes = source.as_bytes();
+    let mut at = from.min(bytes.len());
+    while at < bytes.len() {
+        if !source.is_char_boundary(at) || !is_word_byte(bytes[at]) {
+            at += 1;
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && is_word_byte(bytes[at]) {
+            at += 1;
+        }
+        if &source[start..at] == name {
+            return Some(oche_frontend::SourceSpan { start, end: at });
+        }
+    }
+    None
+}
+
+/// Scans the source and returns the identifier occurrences of `name`, skipping
+/// string literals and comments.
+fn identifier_spans(source: &str, name: &str) -> Vec<oche_frontend::SourceSpan> {
+    let bytes = source.as_bytes();
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != b'"' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+                at += 1;
+            }
+            b'/' if bytes[at..].starts_with(b"//") => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+            }
+            byte if is_word_byte(byte) => {
+                let start = at;
+                while at < bytes.len() && is_word_byte(bytes[at]) {
+                    at += 1;
+                }
+                if &source[start..at] == name {
+                    spans.push(oche_frontend::SourceSpan { start, end: at });
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    spans
+}
+
+/// Returns the `(open, close)` byte offsets of matching brace pairs, skipping
+/// string literals and comments.
+fn brace_pairs(source: &str) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut pairs = Vec::new();
+    let mut stack = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'"' => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != b'"' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+                at += 1;
+            }
+            b'/' if bytes[at..].starts_with(b"//") => {
+                while at < bytes.len() && bytes[at] != b'\n' {
+                    at += 1;
+                }
+            }
+            b'{' => {
+                stack.push(at);
+                at += 1;
+            }
+            b'}' => {
+                if let Some(open) = stack.pop() {
+                    pairs.push((open, at));
+                }
+                at += 1;
+            }
+            _ => at += 1,
+        }
+    }
+    pairs
+}
+
+fn preceding_qualifier(source: &str, word_start: usize) -> Option<String> {
+    let dot = word_start.checked_sub(1)?;
+    (source.as_bytes().get(dot) == Some(&b'.')).then_some(())?;
+    let owner_end = dot.checked_sub(1)?;
+    let owner = word_at(source, owner_end)?;
+    (!owner.is_empty()).then(|| owner.to_string())
+}
+
+fn is_standard_import(path: &str) -> bool {
+    matches!(path, "std/json" | "std/json.oche" | "std/isolate" | "std/isolate.oche")
+}
+
+fn find_declaration(source: &str, uri: &str, name: &str) -> Option<Value> {
+    let program = oche_frontend::parse(source).ok()?;
+    for function in &program.functions {
+        if function.name == name {
+            let span = find_ident(source, function.span.start, name)?;
+            return Some(location_json(uri, range_json(source, span)));
+        }
+    }
+    for structure in &program.structs {
+        if structure.name == name {
+            let span = find_ident(source, structure.span.start, name)?;
+            return Some(location_json(uri, range_json(source, span)));
+        }
+    }
+    for enumeration in &program.enums {
+        if enumeration.name == name {
+            let declaration = enumeration.span?;
+            let span = find_ident(source, declaration.start, name)?;
+            return Some(location_json(uri, range_json(source, span)));
+        }
+    }
+    None
+}
+
+fn is_declaration_position(source: &str, offset: usize) -> bool {
+    let prefix = source[..offset].trim_end();
+    ["fn", "struct", "enum"]
+        .iter()
+        .any(|keyword| prefix.ends_with(keyword))
+}
+
 fn associated_synthetic_name(source: &str, offset: usize, method: &str) -> Option<String> {
     let word = word_at(source, offset)?;
     let word_start = word.as_ptr() as usize - source.as_ptr() as usize;
@@ -1074,5 +1607,148 @@ mod tests {
         let text = String::from_utf8(output).unwrap();
         assert!(text.contains("documentFormattingProvider"));
         assert!(text.contains("fn add(a: Int, b: Int) -> Int { a + b }"));
+    }
+
+    #[test]
+    fn serves_document_symbols_for_declarations() {
+        let source = "struct User { name: String }\nenum State { Active }\nfn rename(user: User) -> User { user }";
+        let mut input = frame(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":"file:///symbols.oche","text":source,"version":1}}
+        })));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","id":2,"method":"textDocument/documentSymbol",
+            "params":{"textDocument":{"uri":"file:///symbols.oche"}}
+        })));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","id":3,"method":"shutdown","params":null}),
+        ));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","method":"exit","params":null}),
+        ));
+        let mut output = Vec::new();
+        run(input.as_slice(), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("\"name\":\"User\""));
+        assert!(text.contains("\"kind\":23"));
+        assert!(text.contains("\"name\":\"name\""));
+        assert!(text.contains("\"kind\":10"));
+        assert!(text.contains("\"kind\":12"));
+        assert!(text.contains("\"detail\":\"fn rename(user: User) -> User\""));
+    }
+
+    #[test]
+    fn serves_folding_ranges_for_braces_and_comments() {
+        let source = "// leading comment\n// second line\nfn outer() -> Int {\n  let value = 1;\n  value\n}";
+        let mut input = frame(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":"file:///folds.oche","text":source,"version":1}}
+        })));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","id":2,"method":"textDocument/foldingRange",
+            "params":{"textDocument":{"uri":"file:///folds.oche"}}
+        })));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","id":3,"method":"shutdown","params":null}),
+        ));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","method":"exit","params":null}),
+        ));
+        let mut output = Vec::new();
+        run(input.as_slice(), &mut output).unwrap();
+        let messages = output_messages(&output);
+        let ranges = messages
+            .iter()
+            .find(|message| message.pointer("/result/0/kind").is_some())
+            .and_then(|message| message.pointer("/result").cloned())
+            .unwrap();
+        assert_eq!(
+            ranges,
+            json!([
+                {"startLine": 0, "endLine": 1, "kind": "comment"},
+                {"startLine": 3, "endLine": 5},
+            ])
+        );
+    }
+
+    #[test]
+    fn serves_definition_for_local_and_qualified_references() {
+        let imported = "fn helper(value: Int) -> Int { value + 1 }";
+        let source = "fn main() -> Int {\n  let local = 2;\n  helper(local)\n}";
+        let mut input = frame(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":"file:///lib.oche","text":imported,"version":1}}
+        })));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":"file:///main.oche","text":"import \"lib.oche\" as util\nfn main() -> Int {\n  let local = 2;\n  util.helper(local)\n}","version":1}}
+        })));
+        // `local` use on line 4 resolves to its `let` binding on line 3.
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","id":2,"method":"textDocument/definition",
+            "params":{"textDocument":{"uri":"file:///main.oche"},"position":{"line":4,"character":14}}
+        })));
+        // `util.helper` on line 4 resolves into the imported module.
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","id":3,"method":"textDocument/definition",
+            "params":{"textDocument":{"uri":"file:///main.oche"},"position":{"line":4,"character":7}}
+        })));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","id":4,"method":"shutdown","params":null}),
+        ));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","method":"exit","params":null}),
+        ));
+        let mut output = Vec::new();
+        run(input.as_slice(), &mut output).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let _ = source;
+        assert!(text.contains("\"uri\":\"file:///main.oche\""));
+        assert!(text.contains("\"uri\":\"file:///lib.oche\""));
+    }
+
+    #[test]
+    fn serves_references_and_document_highlight() {
+        let source = "fn main() -> Int { main() + main() }";
+        let mut input = frame(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen",
+            "params":{"textDocument":{"uri":"file:///main.oche","text":source,"version":1}}
+        })));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","id":2,"method":"textDocument/references",
+            "params":{"textDocument":{"uri":"file:///main.oche"},"position":{"line":0,"character":5},"includeDeclaration":true}
+        })));
+        input.extend(frame(json!({
+            "jsonrpc":"2.0","id":3,"method":"textDocument/documentHighlight",
+            "params":{"textDocument":{"uri":"file:///main.oche"},"position":{"line":0,"character":5}}
+        })));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","id":4,"method":"shutdown","params":null}),
+        ));
+        input.extend(frame(
+            json!({"jsonrpc":"2.0","method":"exit","params":null}),
+        ));
+        let mut output = Vec::new();
+        run(input.as_slice(), &mut output).unwrap();
+        let messages = output_messages(&output);
+        let references = messages
+            .iter()
+            .find(|message| message.pointer("/result/0/uri").is_some())
+            .and_then(|message| message.pointer("/result").cloned())
+            .unwrap();
+        assert_eq!(references.as_array().map(Vec::len), Some(3));
+        let highlights = messages
+            .iter()
+            .filter(|message| message.pointer("/result/0/kind").is_some())
+            .collect::<Vec<_>>();
+        let highlights = highlights
+            .last()
+            .and_then(|message| message.pointer("/result").cloned())
+            .unwrap();
+        assert_eq!(highlights.as_array().map(Vec::len), Some(3));
     }
 }

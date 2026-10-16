@@ -29,8 +29,11 @@ in Oche code.
 
 ## Staged metaprogramming
 
-Stage 0 is implemented as `splice quote { expression }`. The first local code
-value is also available as `let code = quote { expression }; splice code`.
+Stage 0 is implemented as `splice!(quote! { expression })`. The first local code
+value is also available as `let code = quote! { expression }; splice!(code)`.
+The trailing `!` is the reserved compiler-form syntax class, so `quote` and
+`splice` remain ordinary identifiers and later compiler forms such as `tsx!`
+parse without further grammar changes; 0.1 rejects every other `name!` form.
 These forms parse a bounded expression or expression block into the ordinary AST
 and remove all code values before name resolution and type checking. Code values
 are immutable, lexically scoped, reusable, and compile-time only. They cannot

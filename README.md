@@ -34,7 +34,9 @@ tracked in [`TODO.md`](TODO.md) so they do not expand the current language core.
   cannot collide with Dart keywords.
 - `crates/interop`: narrow Dart-to-Oche definition generation for typed,
   namespaced library calls.
-- `crates/lsp`: a dependency-light LSP server with diagnostics, hover help, and
+- `crates/lsp`: a dependency-light LSP server with diagnostics, hover help,
+  document symbols, folding, go-to-definition (including through imports and
+  Dart definition modules), references, in-file highlights, formatting, and
   relative linking of Dart definitions and transitive Oche modules across open
   workspace documents and disk.
 - `crates/cli`: inspection, Kernel/AOT build, JIT execution, and LSP commands.
@@ -118,9 +120,9 @@ while empty literals require an expected `List<T>` type. `left + right` creates 
 new list when both operands have the same list type; `.len()` returns its element
 count, `.first()` and `.last()` return `Option<T>`, and `.rest()` supports
 recursive traversal. String literals can be used in match
-patterns. `quote { expression }` creates a frontend-only local code value;
-`splice quote { expression }` consumes it directly, while `let code = quote {
-... }; splice code` permits local reuse. Expansion happens before name resolution
+patterns. `quote! { expression }` creates a frontend-only local code value;
+`splice!(quote! { expression })` consumes it directly, while `let code =
+quote! { ... }; splice!(code)` permits local reuse. Expansion happens before name resolution
 and type checking, including when the quote contains local statements. These
 restricted `Code<T>` values cannot cross function boundaries, enter runtime
 data, or execute generator code.
@@ -156,8 +158,8 @@ Diagnostics include source locations; unknown names/types, wrong arity,
 duplicate declarations, out-of-range literals, and excessive nesting are rejected.
 
 General comptime, `const fn`, reflection-driven declaration generation, and
-macros are deferred beyond 0.1. The bounded `splice quote` form establishes the
-expression-expansion path without running user code. The earlier prototype
+macros are deferred beyond 0.1. The bounded `splice!`/`quote!` form establishes
+the expression-expansion path without running user code. The earlier prototype
 remains in the repository so its Dart JIT/AOT experiments can inform a later
 staged metaprogramming design.
 

@@ -1,24 +1,26 @@
-fn generated(value: Int) -> Int { splice quote { value * 2 + 1 } }
+fn generated(value: Int) -> Int { splice!(quote! { value * 2 + 1 }) }
 
 fn generatedBlock(value: Int) -> Int {
-  splice quote {
-    let doubled = value * 2;
-    doubled + 1
-  }
+  splice!(
+    quote! {
+      let doubled = value * 2;
+      doubled + 1
+    }
+  )
 }
 
 fn storedCode(value: Int) -> Int {
-  let code = quote { value * 2 + 1 };
-  splice code
+  let code = quote! { value * 2 + 1 };
+  splice!(code)
 }
 
 fn reusedCode(value: Int) -> Int {
-  let code = quote { value + 1 };
-  splice code + splice code
+  let code = quote! { value + 1 };
+  splice!(code) + splice!(code)
 }
 
 fn spliceScope(value: Int) -> Int {
-  let code = quote { local + 1 };
+  let code = quote! { local + 1 };
   let local = value * 2;
-  splice code
+  splice!(code)
 }

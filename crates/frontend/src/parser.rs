@@ -106,10 +106,12 @@ pub enum Error {
     AwaitOutsideAsync { offset: usize },
     #[snafu(display("Prefix 'await' is not supported; write 'expression.await'"))]
     PrefixAwait { offset: usize },
-    #[snafu(display("'quote' must be consumed by 'splice' or bound with immutable 'let'"))]
+    #[snafu(display("'quote! {{ expression }}' must be consumed by 'splice!' or bound with immutable 'let'"))]
     QuoteOutsideSplice { offset: usize },
-    #[snafu(display("'splice' requires a quoted expression or a local Code value"))]
+    #[snafu(display("'splice!' requires a quoted expression or a local Code value"))]
     InvalidSplice { offset: usize },
+    #[snafu(display("Unknown compiler form '{form}!'"))]
+    UnknownCompilerForm { offset: usize, form: String },
     #[snafu(display("Unknown local Code value '{name}'"))]
     UnknownCodeValue { offset: usize, name: String },
     #[snafu(display("Test function '{name}' cannot be public"))]
@@ -164,6 +166,7 @@ impl Error {
             | Self::PrefixAwait { offset }
             | Self::QuoteOutsideSplice { offset }
             | Self::InvalidSplice { offset }
+            | Self::UnknownCompilerForm { offset, .. }
             | Self::PublicTest { offset, .. }
             | Self::TestParameters { offset, .. }
             | Self::TestResult { offset, .. } => *offset,
@@ -190,6 +193,7 @@ enum Kind {
     Comma,
     Arrow,
     FatArrow,
+    Bang,
     Plus,
     Minus,
     Star,
@@ -237,6 +241,7 @@ fn lex(source: &str) -> Result<Vec<Token>, Error> {
             b'>' => Kind::RightAngle,
             b':' => Kind::Colon,
             b',' => Kind::Comma,
+            b'!' => Kind::Bang,
             b'+' => Kind::Plus,
             b'*' => Kind::Star,
             b';' => Kind::Semicolon,
@@ -462,8 +467,6 @@ impl Parser {
                         | "async"
                         | "const"
                         | "await"
-                        | "quote"
-                        | "splice"
                         | "if"
                         | "match"
                         | "true"
@@ -950,19 +953,38 @@ impl Parser {
         } else if self.token().kind == Kind::Name("comptime".into()) {
             self.at += 1;
             Expr::Comptime(Box::new(self.expression(3, depth + 1)?))
-        } else if self.token().kind == Kind::Name("splice".into()) {
-            self.at += 1;
-            Expr::Splice(Box::new(self.expression(3, depth + 1)?))
-        } else if self.token().kind == Kind::Name("quote".into()) {
-            self.at += 1;
-            self.expect(Kind::LeftBrace)?;
-            let block = self.block(depth + 1)?;
-            let expression = if block.statements.is_empty() {
-                *block.tail
-            } else {
-                Expr::Block(block)
+        } else if matches!(self.token().kind, Kind::Name(_))
+            && matches!(
+                self.tokens.get(self.at + 1).map(|token| &token.kind),
+                Some(Kind::Bang)
+            )
+        {
+            let form = match &self.token().kind {
+                Kind::Name(name) => name.clone(),
+                _ => unreachable!("matched a name token"),
             };
-            Expr::Quote(Box::new(expression))
+            let offset = self.token().offset;
+            match form.as_str() {
+                "quote" => {
+                    self.at += 2;
+                    self.expect(Kind::LeftBrace)?;
+                    let block = self.block(depth + 1)?;
+                    let expression = if block.statements.is_empty() {
+                        *block.tail
+                    } else {
+                        Expr::Block(block)
+                    };
+                    Expr::Quote(Box::new(expression))
+                }
+                "splice" => {
+                    self.at += 2;
+                    self.expect(Kind::LeftParen)?;
+                    let expression = self.expression(0, depth + 1)?;
+                    self.expect(Kind::RightParen)?;
+                    Expr::Splice(Box::new(expression))
+                }
+                _ => return Err(Error::UnknownCompilerForm { offset, form }),
+            }
         } else if self.token().kind == Kind::Name("type".into()) {
             self.at += 1;
             let (_, ty) = self.ty()?;
@@ -3344,7 +3366,7 @@ mod tests {
 
     #[test]
     fn expands_direct_quoted_expressions_before_validation() {
-        let source = "fn generated(value: Int) -> Int { splice quote { value * 2 + 1 } }";
+        let source = "fn generated(value: Int) -> Int { splice!(quote! { value * 2 + 1 }) }";
         let parsed = parse(source).unwrap();
         assert!(matches!(
             parsed.functions[0].body.unlocated(),
@@ -3356,8 +3378,8 @@ mod tests {
         assert_eq!(
             parsed.functions[0].body.span(),
             Some(SourceSpan {
-                start: source.find("splice quote").unwrap(),
-                end: source.find("splice quote").unwrap() + "splice quote { value * 2 + 1 }".len(),
+                start: source.find("splice!(quote!").unwrap(),
+                end: source.find("splice!(quote!").unwrap() + "splice!(quote! { value * 2 + 1 })".len(),
             })
         );
     }
@@ -3365,7 +3387,7 @@ mod tests {
     #[test]
     fn expands_local_code_values_before_validation() {
         let parsed = parse(
-            "fn generated(value: Int) -> Int { let code = quote { value * 2 }; splice code + 1 }",
+            "fn generated(value: Int) -> Int { let code = quote! { value * 2 }; splice!(code) + 1 }",
         )
         .unwrap();
         assert!(matches!(
@@ -3379,11 +3401,27 @@ mod tests {
 
     #[test]
     fn rejects_unconsumed_quotes_and_non_code_splices() {
-        let quote = parse("fn bad() -> Int { quote { 1 } }").unwrap_err();
+        let quote = parse("fn bad() -> Int { quote! { 1 } }").unwrap_err();
         assert!(matches!(quote, Error::QuoteOutsideSplice { .. }));
 
-        let splice = parse("fn bad() -> Int { splice 1 }").unwrap_err();
+        let splice = parse("fn bad() -> Int { splice!(1) }").unwrap_err();
         assert!(matches!(splice, Error::InvalidSplice { .. }));
+
+        let unknown = parse("fn bad() -> Int { tsx! { 1 } }").unwrap_err();
+        assert!(matches!(unknown, Error::UnknownCompilerForm { ref form, .. } if form == "tsx"));
+    }
+
+    #[test]
+    fn quote_and_splice_are_ordinary_identifiers() {
+        let parsed = parse(
+            "fn rename(value: Int) -> Int { let quote = value; let splice = quote + 1; splice }",
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed.functions[0].body.unlocated(),
+            Expr::Block(block)
+                if matches!(block.tail.unlocated(), Expr::Variable(name) if name == "splice")
+        ));
     }
 
     #[test]
