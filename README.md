@@ -10,6 +10,21 @@ Rust-influenced syntax, postfix types, `let mut`, expression patterns, `Option`/
 and deterministic built-in derivation. Explicitly deferred experiments are
 tracked in [`TODO.md`](TODO.md) so they do not expand the current language core.
 
+## Toolchain
+
+[mise](https://mise.jdx.dev/) provisions the required CLI tools. The Dart SDK
+is pinned in [`mise.toml`](mise.toml) to the release the VM binding was
+validated against; `sdk-info` discovers it through mise, an explicit SDK
+directory, or `OCHE_DART_SDK`.
+
+```sh
+mise install        # provisions dart and rust as pinned in mise.toml
+mise run check      # fmt --check + clippy -D warnings + cargo test --workspace
+```
+
+CI (`.github/workflows/ci.yml`) runs the same checks through mise on Linux and
+macOS. Releases are cut by release-please from conventional commits on `main`.
+
 ## Current state
 
 - `crates/dart-vm`: bindgen-generated Dart C ABI plus a hand-written safe wrapper

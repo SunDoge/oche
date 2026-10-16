@@ -436,7 +436,11 @@ impl<R: Read, W: Write> Server<R, W> {
         let Some(source) = self.analysis.file(file).map(|file| file.text.clone()) else {
             return Value::Null;
         };
-        let Some(program) = self.analysis.parse(file).and_then(|snapshot| snapshot.program) else {
+        let Some(program) = self
+            .analysis
+            .parse(file)
+            .and_then(|snapshot| snapshot.program)
+        else {
             return Value::Null;
         };
         let mut symbols = Vec::new();
@@ -535,16 +539,16 @@ impl<R: Read, W: Write> Server<R, W> {
                     Some((_, end)) => *end = index,
                     None => comment_run = Some((index, index)),
                 }
-            } else if let Some((start, end)) = comment_run.take() {
-                if end > start {
-                    ranges.push(json!({"startLine": start, "endLine": end, "kind": "comment"}));
-                }
-            }
-        }
-        if let Some((start, end)) = comment_run {
-            if end > start {
+            } else if let Some((start, end)) = comment_run.take()
+                && end > start
+            {
                 ranges.push(json!({"startLine": start, "endLine": end, "kind": "comment"}));
             }
+        }
+        if let Some((start, end)) = comment_run
+            && end > start
+        {
+            ranges.push(json!({"startLine": start, "endLine": end, "kind": "comment"}));
         }
         for (open, close) in brace_pairs(&source) {
             let open_line = line_of(&source, open);
@@ -567,7 +571,7 @@ impl<R: Read, W: Write> Server<R, W> {
             Some(file) => file.text.clone(),
             None => return Value::Null,
         };
-        let Some((line, character)) = position_params(&params) else {
+        let Some((line, character)) = position_params(params) else {
             return Value::Null;
         };
         let Some(offset) = position_to_offset(&source, line, character) else {
@@ -576,7 +580,11 @@ impl<R: Read, W: Write> Server<R, W> {
         let Some((word, word_start)) = word_and_offset(&source, offset) else {
             return Value::Null;
         };
-        let Some(program) = self.analysis.parse(file).and_then(|snapshot| snapshot.program) else {
+        let Some(program) = self
+            .analysis
+            .parse(file)
+            .and_then(|snapshot| snapshot.program)
+        else {
             return Value::Null;
         };
         // A qualified reference `alias.name` resolves into the imported module.
@@ -606,15 +614,14 @@ impl<R: Read, W: Write> Server<R, W> {
         }
         // Clicking an import alias jumps into the imported module.
         if let Some(import) = program.imports.iter().find(|import| import.alias == word) {
-            if !is_standard_import(&import.path) {
-                if let Some(imported_uri) = resolve_import_uri(uri, &import.path) {
-                    if self.read_source(&imported_uri).is_some() {
-                        return json!([location_json(
-                            &imported_uri,
-                            json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}})
-                        )]);
-                    }
-                }
+            if !is_standard_import(&import.path)
+                && let Some(imported_uri) = resolve_import_uri(uri, &import.path)
+                && self.read_source(&imported_uri).is_some()
+            {
+                return json!([location_json(
+                    &imported_uri,
+                    json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}})
+                )]);
             }
             return Value::Null;
         }
@@ -629,10 +636,13 @@ impl<R: Read, W: Write> Server<R, W> {
         else {
             return Value::Null;
         };
-        if function.parameters.iter().any(|parameter| parameter.name == word) {
-            if let Some(span) = find_ident(&source, function.span.start, word) {
-                return json!([location_json(uri, range_json(&source, span))]);
-            }
+        if function
+            .parameters
+            .iter()
+            .any(|parameter| parameter.name == word)
+            && let Some(span) = find_ident(&source, function.span.start, word)
+        {
+            return json!([location_json(uri, range_json(&source, span))]);
         }
         let base = function.span.start;
         let region = &source[base..offset];
@@ -648,7 +658,7 @@ impl<R: Read, W: Write> Server<R, W> {
                 && rest
                     .as_bytes()
                     .get(word.len())
-                    .map_or(true, |byte| !is_word_byte(*byte))
+                    .is_none_or(|byte| !is_word_byte(*byte))
             {
                 binding = Some(base + ident);
             }
@@ -679,7 +689,7 @@ impl<R: Read, W: Write> Server<R, W> {
         let Some(source) = self.analysis.file(file).map(|file| file.text.clone()) else {
             return Value::Null;
         };
-        let Some((line, character)) = position_params(&params) else {
+        let Some((line, character)) = position_params(params) else {
             return Value::Null;
         };
         let Some(offset) = position_to_offset(&source, line, character) else {
@@ -721,7 +731,7 @@ impl<R: Read, W: Write> Server<R, W> {
         let Some(source) = self.analysis.file(file).map(|file| file.text.clone()) else {
             return Value::Null;
         };
-        let Some((line, character)) = position_params(&params) else {
+        let Some((line, character)) = position_params(params) else {
             return Value::Null;
         };
         let Some(offset) = position_to_offset(&source, line, character) else {
@@ -1152,11 +1162,7 @@ fn is_word_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn find_ident(
-    source: &str,
-    from: usize,
-    name: &str,
-) -> Option<oche_frontend::SourceSpan> {
+fn find_ident(source: &str, from: usize, name: &str) -> Option<oche_frontend::SourceSpan> {
     let bytes = source.as_bytes();
     let mut at = from.min(bytes.len());
     while at < bytes.len() {
@@ -1256,7 +1262,10 @@ fn preceding_qualifier(source: &str, word_start: usize) -> Option<String> {
 }
 
 fn is_standard_import(path: &str) -> bool {
-    matches!(path, "std/json" | "std/json.oche" | "std/isolate" | "std/isolate.oche")
+    matches!(
+        path,
+        "std/json" | "std/json.oche" | "std/isolate" | "std/isolate.oche"
+    )
 }
 
 fn find_declaration(source: &str, uri: &str, name: &str) -> Option<Value> {
@@ -1640,7 +1649,8 @@ mod tests {
 
     #[test]
     fn serves_folding_ranges_for_braces_and_comments() {
-        let source = "// leading comment\n// second line\nfn outer() -> Int {\n  let value = 1;\n  value\n}";
+        let source =
+            "// leading comment\n// second line\nfn outer() -> Int {\n  let value = 1;\n  value\n}";
         let mut input = frame(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
         input.extend(frame(json!({
             "jsonrpc":"2.0","method":"textDocument/didOpen",

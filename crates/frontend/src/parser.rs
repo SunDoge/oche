@@ -106,7 +106,9 @@ pub enum Error {
     AwaitOutsideAsync { offset: usize },
     #[snafu(display("Prefix 'await' is not supported; write 'expression.await'"))]
     PrefixAwait { offset: usize },
-    #[snafu(display("'quote! {{ expression }}' must be consumed by 'splice!' or bound with immutable 'let'"))]
+    #[snafu(display(
+        "'quote! {{ expression }}' must be consumed by 'splice!' or bound with immutable 'let'"
+    ))]
     QuoteOutsideSplice { offset: usize },
     #[snafu(display("'splice!' requires a quoted expression or a local Code value"))]
     InvalidSplice { offset: usize },
@@ -3379,7 +3381,8 @@ mod tests {
             parsed.functions[0].body.span(),
             Some(SourceSpan {
                 start: source.find("splice!(quote!").unwrap(),
-                end: source.find("splice!(quote!").unwrap() + "splice!(quote! { value * 2 + 1 })".len(),
+                end: source.find("splice!(quote!").unwrap()
+                    + "splice!(quote! { value * 2 + 1 })".len(),
             })
         );
     }

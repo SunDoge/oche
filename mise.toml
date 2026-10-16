@@ -1,0 +1,16 @@
+# Toolchain for Oche development.
+#
+# `mise install` provisions everything the build needs. The Dart SDK version is
+# pinned to the release the VM binding was validated against; `sdk-info`
+# discovers it through mise, an explicit SDK directory, or OCHE_DART_SDK.
+[tools]
+dart = "3.13.5"
+rust = "1.99.0"
+
+[tasks.check]
+description = "Run fmt --check, clippy, and the full test suite"
+run = [
+  "cargo fmt --check",
+  "cargo clippy --workspace --all-targets -- -D warnings",
+  "cargo test --workspace",
+]
