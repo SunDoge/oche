@@ -1,0 +1,21 @@
+# release-plz configuration: https://release-plz.dev/docs/config
+#
+# All crates share `version.workspace = true`, so release-plz bumps the
+# workspace version once and cuts one release for the whole toolchain —
+# frontend and VM stay versioned together because Kernel is an internal format.
+
+[workspace]
+# Keep dependency updates out of release PRs.
+dependencies_update = false
+
+# `cargo publish` runs against crates.io only after the 0.1.0 release flips the
+# workspace `publish` flag; the release PRs themselves work today.
+publish = false
+
+# Tag each release (v0.1.0) and attach the changelog as a GitHub release.
+git_tag_enable = true
+git_release_enable = true
+
+# Conventional-commit changelog at the repository root.
+changelog_update = true
+changelog_path = "CHANGELOG.md"

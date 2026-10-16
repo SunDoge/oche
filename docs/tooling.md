@@ -13,7 +13,9 @@ mise run check      # fmt --check + clippy -D warnings + cargo test --workspace
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same checks through mise on Linux and
-macOS. Releases are cut by release-please from conventional commits on `main`.
+macOS. Releases are cut by release-plz from conventional commits on `main`:
+the workspace shares one version, so every crate and the changelog bump
+together in one release PR.
 
 ## SDK headers
 
