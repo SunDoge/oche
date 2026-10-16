@@ -1,0 +1,33 @@
+name: Release prepare
+
+# Opens or updates the release PR from conventional commits on main. The PR
+# bumps the shared workspace version and CHANGELOG.md; merging it (a commit
+# starting with "chore: release") triggers release-publish.yml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-pr:
+    name: Open release pull request
+    # Skip release commits so publishing does not open the next PR immediately.
+    if: "!startsWith(github.event.head_commit.message, 'chore: release')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v2
+        with:
+          install: true
+      - name: Run release-plz
+        uses: release-plz/release-plz@v2
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

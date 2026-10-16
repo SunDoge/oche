@@ -13,9 +13,12 @@ mise run check      # fmt --check + clippy -D warnings + cargo test --workspace
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same checks through mise on Linux and
-macOS. Releases are cut by release-plz from conventional commits on `main`:
-the workspace shares one version, so every crate and the changelog bump
-together in one release PR.
+macOS. Releases are cut by release-plz in two stages, both driven from
+conventional commits on `main`: `release-prepare.yml` opens a release PR that
+bumps the shared workspace version and CHANGELOG.md, and merging it (a commit
+starting with `chore: release`) triggers `release-publish.yml`, which tags and
+publishes. crates.io publishing stays disabled until the 0.1.0 release flips
+the workspace `publish` flag.
 
 ## SDK headers
 
