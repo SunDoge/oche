@@ -25,6 +25,7 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           install: true
+          install_args: rust
       - name: Run release-plz
         uses: release-plz/action@8921286633dfa0c4020f7f30bd1c14fe19cbb10e # v0.5.142
         with:

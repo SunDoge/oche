@@ -20,6 +20,7 @@ jobs:
       - uses: jdx/mise-action@v2
         with:
           install: true
+          install_args: rust dart
       - name: Show tool versions
         run: |
           mise exec -- dart --version
