@@ -39,9 +39,21 @@ constraint on the language model.
   directly to Dart's `Isolate.run(() => expression)` and returns `Future<T>`.
   The expression is evaluated in the worker isolate. No isolate-specific syntax
   is part of 0.1.
+- Native interop is a 0.1 capability implemented as a thin, typed surface over
+  `dart:ffi`, not as a separate Oche FFI runtime. Oche reuses Dart's native
+  types, loading, symbol lookup, calls, pointers, and finalizers; bindings are
+  statically checked and unavailable on the JavaScript target. The first boundary covers
+  fixed-width scalars, byte buffers, UTF-8 strings through explicit adapters,
+  and opaque owned or borrowed handles. Native ownership and release functions
+  must be visible in a binding rather than inferred from pointer types.
 - `value |> transform(argument)` inserts `value` as the first call argument. The
   right side must be a call, may be module-qualified, and pipe has lower
   precedence than arithmetic operators.
+- `quote { expression }` creates a local compile-time code value and `splice`
+  inserts it before name resolution and type checking. A quote may be consumed
+  directly or bound with immutable `let`: `let code = quote { value + 1 };
+  splice code`. Ordinary identifiers inside it resolve at the splice site. Code
+  values never reach Dart and cannot yet cross a function boundary.
 - Tests use the single canonical form `test [async] fn`; `test` is always a
   prefix modifier.
 
@@ -101,18 +113,23 @@ for implementation work:
   `T`, and use postfix `.await` only;
 - imports are always aliased and references across a module boundary are always
   qualified;
-- compile-time evaluation runs ordinary Oche `const fn` code; `const` is an
-  author assertion in 0.1 rather than a compiler-proven effect classification;
-  generators such as `comptime jsonEncode(User)` are compile-time calls that
-  materialize typed HIR declarations;
+- native definition modules describe C symbols separately from ordinary Oche
+  source, use exact ABI types, and expose an idiomatic checked Oche signature;
+  Rust libraries are expected to export `extern "C"` functions with stable,
+  unmangled symbol names;
+- compiler-owned derivations may synthesize typed helpers for standard-library
+  features such as JSON, but 0.1 exposes no general comptime or macro system;
+- `quote` and `splice` may construct and locally reuse expression AST before
+  checking; code values cannot generate declarations, cross a function
+  boundary, enter runtime data, or execute user code;
 - tests are parameterless `test fn` or `test async fn` declarations returning
   `Bool`.
 
 Oche 0.1 does not include classes, inheritance, mixins, dynamically dispatched methods,
 traits, interfaces, implementation blocks, operator overloading, implicit
 numeric or error conversions, nullable core types, `dynamic`, general type
-inference, first-class functions, mutable fields or collections, macros, or
-isolate-specific syntax.
+inference, first-class functions, mutable fields or collections, `const fn`,
+`comptime`, macros, or isolate-specific syntax.
 These are design deferrals rather than placeholders that each need to be filled.
 
 In particular, a Rust-style trait system is not part of the initial language.
@@ -136,99 +153,39 @@ visible in the imported signature.
 
 The transpiler is intentionally mechanical. Surface declarations, expressions,
 patterns, async operations, and core types each have a direct Dart 3 lowering.
-The backend does not know about JSON, validation, tools, RPC schemas, or agent
-protocols. Those features are Oche libraries evaluated through `comptime` and
-return compiler-owned typed declarations, which then pass through the ordinary
-name resolution, type checking, and Dart lowering pipeline.
-
-`comptime` extends the program after parsing; it does not extend the parser.
-Features described as complex "syntax" should therefore normally be explicit
-generator calls such as `comptime jsonEncode(User)`, backed by ordinary Oche code.
-Oche does not add token macros, quoted source, string evaluation, or a separate
-template language. The metaprogramming boundary consists of reflected `Type`
-and `Field` values plus a small typed declaration IR.
+Standard-library features may request compiler-owned typed helpers, but those
+helpers are an implementation detail and do not expose an AST or declaration IR
+to Oche programs.
 
 ```text
-source → syntax AST → module linking → base typed HIR
-       → comptime Oche → Dart → Kernel → build-time Dart VM
-       → generated declarations/values → merged typed HIR → final Dart
+source → syntax AST → module linking → type inference and checked HIR
+       → compiler-owned standard derivations and native bindings → Dart
        → Kernel → Dart VM JIT (primary runtime)
                 ↘ Dart AOT
                 ↘ JavaScript → ESM host
 ```
 
-`comptime` belongs between semantic analysis and runtime lowering. It executes
-the same expressions, control flow, functions, and type rules as runtime Oche.
-Functions eligible for that evaluator use `const fn`; they remain ordinary
-runtime-callable functions. In 0.1 this modifier is the author's assertion that
-the function is deterministic and capability-free. The compiler does not build
-a general effect system or prove purity. Async functions are rejected at the
-comptime boundary. Capability filtering and finite recursion, instruction, and
-allocation budgets have not been implemented yet; until then, imported Dart
-calls reachable from a `const fn` carry the same authority as the compiler
-process.
+The repository contains an earlier comptime prototype that executes Oche through
+the Dart VM. It is retained as implementation research while standard derivations
+are moved behind compiler-owned APIs; it is not part of the 0.1 language contract.
+General staged evaluation must define typing phases, capabilities, budgets,
+caching, reproducibility, source mapping, and LSP execution before it can become
+public syntax.
 
-The first value-level form is deliberately narrow:
-
-```text
-const fn scale(value: Int, factor: Int) -> Int { value * factor }
-fn configured_capacity() -> Int { comptime scale(16384, 2) }
-```
-
-It accepts direct calls to synchronous `const fn` declarations returning `Int`,
-`Float`, `Bool`, `String`, recursively composed `List<T>` values, or named
-structs whose fields use those same types. Parameters use the same value types.
-The first implementation accepts literal arguments;
-constant expression arguments will follow. Every call site has its own request
-identity, so two invocations of the same function with different arguments
-cannot share a result accidentally.
-The build-time Dart VM returns a typed scalar through a JSON protocol, and the
-compiler replaces the expression with an AST literal before final HIR lowering.
-User code does not return generated source, and no source string is evaluated.
-Editors validate and type-check this form without running the function.
-Type reflection, generated declarations, caching, and execution budgets are
-later stages of the same pipeline.
-
-The reflection kernel uses `type T` to produce a compile-time `Type` value.
-`Type` exposes `name`, `arguments`, and `fields`; each `Field` exposes `name`
-and `ty`. These are compiler-owned read-only values rather than syntax strings.
-
-Generated functions use a composable builder API over the compiler-owned flat
-declaration protocol. An expression builder owns its nodes and root; combining
-builders rebases child indexes internally. Function generators therefore build
-the body first and finish it through a declaration builder, for example
-`functionBuilder(name, parameters, result) |> returns(body)`. Visibility,
-type parameters, async state, and attributes can later extend that declaration
-builder without exposing protocol indexes or requiring syntax-tree strings in
-user generators.
-
-Types and their struct fields or enum variants become compile-time values
-through a typed reflection API. Explicit calls such as `comptime jsonEncode(User)`
-pass the named type to a `const fn`. Generated declarations are
-inserted into typed HIR before ordinary calls are resolved, so diagnostics,
-hover, completion, and backend lowering use the same symbol table.
-
-The compiler lowers comptime Oche through the same Dart backend used for runtime
-code, compiles it to Kernel, and invokes it in a build-time Dart VM isolate. The
-result is then merged into typed HIR before final code generation. This remains
-the pipeline when the requested final artifact is AOT: Dart VM executes comptime
-first, then the expanded Dart program is handed to the AOT compiler. Oche does
-not maintain a second interpreter with subtly different arithmetic, matching,
-or collection semantics.
-
-The JSON generators are ordinary Oche `const fn` libraries in `stdlib/json.oche`.
-They use type reflection and the typed declaration builder protocol, execute in
-the build-time Dart VM, and return declarations that pass through the normal HIR
-and backend. Validation still uses its bootstrap implementation.
+The bounded `quote`/`splice` form stops before staged evaluation. It parses an
+expression into the existing AST and removes the generation boundary before
+module linking. An immutable local may hold that frontend-only code value and
+splice it more than once within its lexical scope. Quoted identifiers use the
+ordinary scope at each splice site, and the resulting expression follows the
+normal type checker, diagnostics, LSP, and Dart lowering paths. This is the
+first restricted `Code<T>` model, although `Code<T>` cannot yet be written in a
+function signature or stored inside runtime data.
 
 Oche uses `let` for a single-assignment local and `let mut` when the binding must
 be reassigned. Mutable bindings initially require a single identifier, retain
 their inferred type, and lower directly to Dart local variables; immutable
 bindings lower to Dart `final`. Oche has no separate `var` declaration, mutable
-struct field, or module-level named constant yet. A `let` becomes a compile-time
-value when evaluated inside comptime and a runtime value otherwise. `const fn`
-marks evaluation eligibility; it does not introduce a second kind of stored
-value.
+struct field, or module-level named constant yet.
 
 Language additions should have a direct, typed Dart 3 lowering. Features that
 would require semantics beyond Dart 3 stay out until concrete user feedback
@@ -255,11 +212,43 @@ target-specific branch of its type or control-flow semantics.
 | `let` | inferred Dart `final` local |
 | `let mut` | inferred Dart `var` local of the checked Oche type |
 | `try` and `?` | private typed propagation sentinel caught at the Oche boundary |
+| `splice quote { expression }` | the checked Dart expression produced by the ordinary lowering |
+| native C ABI declaration | typed `dart:ffi` lookup or native-asset binding |
 
 The executable mapping suite exercises these representations through both
 `oche run` and `oche build-exe`. A language feature is not part of the core
 contract until it has JIT/AOT parity coverage or an explicit backend-boundary
 restriction.
+
+## Native FFI contract
+
+FFI is a backend boundary, not a second dynamic type system or runtime. A native
+binding maps mechanically to `dart:ffi` and may pair that representation with a
+safer Oche-facing wrapper. ABI integers
+use an explicit width and signedness; platform C types such as `long` are not
+silently treated as Oche `Int`. Raw addresses do not implicitly become strings,
+lists, structs, or managed objects.
+
+The first supported Rust pattern is a C API composed from:
+
+- `extern "C"` exported functions with stable symbols;
+- fixed-width integer and floating-point arguments and results;
+- `(pointer, length)` byte slices whose borrow lasts for the call;
+- opaque handles created and destroyed by named functions;
+- owned result buffers paired with an explicit native release function;
+- status codes translated by a checked Oche wrapper into `Result`.
+
+JIT and AOT use the same binding signature and ownership rules. Native calls
+execute on the calling isolate unless an Oche wrapper explicitly uses
+`isolate.run`; a blocking call is never moved automatically. The JavaScript
+backend rejects modules that reach native bindings. Callbacks, variadic
+functions, unions, bitfields, packed layouts, and structs passed by value are
+outside the first FFI milestone.
+
+Binding generation should consume C headers through the mature Dart `ffigen`
+toolchain rather than duplicating its C parser, while keeping the small Oche
+definition format as the checked public boundary. Rust crates may generate those headers with
+`cbindgen`; Oche does not parse Rust source or depend on Rust's unstable ABI.
 
 The HIR assigns every module a stable identity. Resolved source functions,
 structs, variants, generated functions, and imported Dart functions combine that
@@ -275,15 +264,9 @@ preserves expression and pattern locations, and type diagnostics retain the
 innermost failing range. Match exhaustiveness uses the match offset; arm
 usefulness highlights the complete redundant pattern.
 
-The language server does not start a fresh Dart VM or rerun every `const fn` on
-each edit. Parsing and base type checking update immediately. Comptime expansion
-runs after a debounce only when a generator, its typed inputs, or its transitive
-dependencies change. A persistent worker caches successful generated
-declarations by compiler version and dependency/input hashes; while it
-recomputes, analysis may use the last successful expansion and mark it stale.
-Worker time, allocation, recursion, and generated-output budgets keep editor
-latency bounded. Build and save-time analysis always require a current
-expansion.
+The language server performs parsing, linking, type analysis, and compiler-owned
+derivation in process. It never executes user code to provide diagnostics,
+completion, hover, or navigation.
 
 ```text
 struct User {
@@ -291,32 +274,28 @@ struct User {
   age: Int,
 }
 
-comptime jsonEncode(User)
-comptime jsonDecode(User)
-comptime validate(User, name: non_empty, age: range(0, 130))
+import "std/json" as json
 
-fn encode(user: User) -> String { user.toJson() }
+fn encode(user: User) -> String { json.encode(type User, user) }
 
-fn decode(source: String) -> Result<User, String> { User.fromJson(source) }
+fn decode(source: String) -> Result<User, String> { json.decode(type User, source) }
 ```
 
-The two JSON directives invoke independent Oche compile-time generators, so a
-program only materializes the direction it requests. They produce
-compiler-reserved codec functions. Static call sugar resolves `user.toJson()`
-and `User.fromJson(source)` to those functions without runtime dispatch.
-Decoding and validation return `Result` so malformed input
-stays in the language's normal control flow. JSON generation accepts primitive `Int`, `Float`,
-`Bool`, and `String` fields plus nested derived structs and lists. Validation
-supports `non_empty` for strings and inclusive `range` for integers.
+Typed JSON calls request compiler-owned codec helpers. No user comptime
+execution is involved. Typed encoding writes directly to a `StringBuffer`
+without first allocating a `Map<String, Object?>`; typed decoding reads the JSON
+stream and constructs the target struct without first building a complete
+dynamic object tree. Decoding returns `Result` so malformed input stays in the
+language's normal control flow. JSON derivation accepts primitive `Int`,
+`Float`, `Bool`, and `String` fields plus nested derived structs and lists.
 
 ### JSON namespace
 
-The directives and generated member-call sugar above remain available as a
-bootstrap API. New code imports the built-in JSON namespace. Typed calls request
-their encode or decode generator automatically, so generated function names do
-not enter the source-level API and cannot collide with user methods. Requests
-also follow nested struct and `List<T>` fields transitively while preserving the
-requested direction.
+New code imports the built-in JSON namespace. Typed calls request their encode or
+decode helper automatically, so generated function names do not enter the
+source-level API and cannot collide with user methods. Requests also follow
+nested struct and `List<T>` fields transitively while preserving the requested
+direction.
 
 ```text
 import "std/json" as json
@@ -346,7 +325,7 @@ infallible in the 0.1 type model. `parse`, `decode`, and `fromValue` report shap
 and input errors through `Result`.
 
 The explicit `type User` argument determines every dependent parameter and
-result type before the generator executes. Oche 0.1 will not infer a decode
+result type before codec derivation. Oche 0.1 will not infer a decode
 target from its result location and will not add `anytype`, trait bounds, or
 overload resolution for this API. A future shorthand may infer the encode type
 from its value argument without changing the underlying model.
@@ -368,11 +347,10 @@ The matching `object`, `array`, `fromInt`, `fromFloat`, `fromBool`, and
 `fromString` operations construct checked values. Raw Dart `Object?` stays
 inside the backend representation and does not leak into Oche types.
 
-At compilation, typed JSON calls specialize through ordinary Oche comptime
-reflection and lower to concrete private Dart helpers. The final Dart program
+At compilation, typed JSON calls lower to concrete private Dart helpers. The final Dart program
 contains no reflected `Type`, field table, trait object, or dynamic method call.
 The language server can determine the call signature from the explicit type
-argument immediately and cache the later comptime expansion independently.
+argument immediately.
 
 ## Dart interop
 
@@ -414,7 +392,7 @@ are designed together.
 
 ## Tooling
 
-The `oche lsp` server publishes parser, comptime, and HIR type diagnostics. It
+The `oche lsp` server publishes parser, linking, and HIR type diagnostics. It
 resolves aliased Dart definitions and transitive Oche modules relative to the
 source document from open editor buffers or disk, and reanalyzes open dependents
 when any imported document changes. It provides hover help for core types,
@@ -428,4 +406,4 @@ grammar, and launches that server over stdio.
 The parser, HIR, and Dart lowering support the complete 0.1 convergence
 contract, including transitive aliased Oche modules. CLI and editor paths use the
 same frontend, linked-package HIR, visibility rules, module-qualified identities,
-and comptime evaluator.
+and compiler-owned derivation pipeline.

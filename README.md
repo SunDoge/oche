@@ -18,18 +18,17 @@ tracked in [`TODO.md`](TODO.md) so they do not expand the current language core.
   Kernel loading, primitive invocation, and byte-buffer finalizers remain in the
   reviewed wrapper.
 - `crates/frontend`: lexer, AST, parser, postfix generic types, function and
-  variable resolution, structs, `const fn`, and comptime
-  declarations, and early semantic checks.
+  variable resolution, structs, and early semantic checks. The repository still
+  carries an experimental comptime parser path outside the 0.1 contract.
 - `crates/hir`: typed expressions, module-qualified callable and data identities,
-  local generic variant inference, and signatures produced by comptime generators
-  and `comptime` declarations.
+  local generic variant inference, and compiler-owned synthetic declarations.
 - `crates/formatter`: comment-preserving, width-aware formatting built on
   Wadler-style document combinators.
 - `crates/analysis`: stable file identities, source revisions, shared compiler
   snapshots, spans, and staged diagnostics for the CLI and LSP.
-- `crates/comptime`: bootstrap derivation plus value-level `const fn` requests.
-  The CLI runs scalar requests in the build-time Dart VM and substitutes typed
-  literals into the syntax tree before final HIR lowering.
+- `crates/comptime`: an experimental bootstrap retained while JSON and other
+  standard derivations move behind compiler-owned APIs. It is not a public 0.1
+  language feature.
 - `crates/codegen`: deterministic typed-HIR lowering to Dart. Resolved callable
   and field identities are preserved through emission; indexed Dart identifiers
   cannot collide with Dart keywords.
@@ -85,7 +84,10 @@ python3 oche/tests/run_agent_machine_acceptance.py
 python3 oche/tests/run_jit_agent_machine_acceptance.py
 python3 oche/tests/run_pi_mono_acceptance.py
 python3 oche/tests/run_dart_interop_acceptance.py
+python3 oche/tests/run_system_ffi_acceptance.py
+python3 oche/tests/run_generated_expression_acceptance.py
 python3 oche/tests/run_module_acceptance.py
+python3 oche/benchmarks/json_benchmark.py
 python3 oche/tests/run_dart_mapping_acceptance.py
 python3 oche/tests/check_editor_assets.py
 ```
@@ -116,7 +118,13 @@ while empty literals require an expected `List<T>` type. `left + right` creates 
 new list when both operands have the same list type; `.len()` returns its element
 count, `.first()` and `.last()` return `Option<T>`, and `.rest()` supports
 recursive traversal. String literals can be used in match
-patterns. Async values are awaited with the postfix `.await` operator. Awaiting
+patterns. `quote { expression }` creates a frontend-only local code value;
+`splice quote { expression }` consumes it directly, while `let code = quote {
+... }; splice code` permits local reuse. Expansion happens before name resolution
+and type checking, including when the quote contains local statements. These
+restricted `Code<T>` values cannot cross function boundaries, enter runtime
+data, or execute generator code.
+Async values are awaited with the postfix `.await` operator. Awaiting
 is checked to occur only inside an async function and can consume both Oche async
 calls and Dart functions declared as returning `Future<T>`. `import "std/isolate"
 as isolate` exposes `isolate.run(expression)`, which runs the expression through
@@ -131,13 +139,12 @@ patterns are rejected. Matches lower to Dart object patterns and `when` clauses.
 Native Dart VM `int` arithmetic gives this MVP signed 64-bit wraparound behavior.
 `Float` maps to Dart `double` and JavaScript `number`; arithmetic requires
 matching numeric types and does not implicitly convert between `Int` and `Float`.
-`comptime jsonEncode(Type)` and `comptime jsonDecode(Type)` independently generate
-JSON encoding and checked decoding for primitive fields, nested structs, and `List<T>` values;
 `import "std/json" as json` provides the preferred collision-free namespace API:
 `json.encode(type User, user)`, `json.decode(type User, source)`, and dynamic
-`JsonValue` parsing automatically request the required generators.
-`comptime validate(Type, ...)` generates `non_empty`
-and inclusive integer `range(min, max)` validation. Dart definition files are
+`JsonValue` parsing request compiler-owned typed helpers as needed. Typed
+encoding writes JSON directly and typed decoding constructs structs from a
+streaming reader, avoiding an intermediate dynamic object tree. Field
+validation derivation is deferred beyond the 0.1 core. Dart definition files are
 imported through a mandatory alias, so `import "tools.d.oche" as tools` exposes
 only qualified calls such as `tools.greet(name)`. The typed HIR checks every
 currently supported expression and infers generic variants such as `Some(1)` in
@@ -148,17 +155,19 @@ inference is intentionally outside the 0.1 contract.
 Diagnostics include source locations; unknown names/types, wrong arity,
 duplicate declarations, out-of-range literals, and excessive nesting are rejected.
 
-Value-level comptime uses the ordinary expression form `comptime function()`.
-Its initial boundary accepts a direct synchronous `const fn` returning `Int`,
-`Float`, `Bool`, `String`, or a recursively composed `List<T>` of those values.
-Named structs whose fields recursively use supported value types are supported
-as well. Parameters use the same value types, and each argument must currently
-be a literal. The compiler emits a temporary
-typed Dart runner, compiles it to Kernel, executes it in the build-time Dart VM,
-decodes the scalar result, and replaces the comptime expression with an Oche
-literal. Runtime Dart and AOT artifacts therefore contain the value rather than
-an evaluator or source string. LSP analysis type-checks the expression and
-reports boundary errors without executing user code.
+General comptime, `const fn`, reflection-driven declaration generation, and
+macros are deferred beyond 0.1. The bounded `splice quote` form establishes the
+expression-expansion path without running user code. The earlier prototype
+remains in the repository so its Dart JIT/AOT experiments can inform a later
+staged metaprogramming design.
+
+Native FFI is part of the 0.1 foundation and is deliberately a thin typed layer
+over `dart:ffi`. The intended production path is Oche → generated Dart FFI
+binding → a Rust `extern "C"` API, with JIT/AOT parity and an explicit
+ownership contract for every pointer. The
+existing Rust/Dart VM probes exercise the reverse embedding direction; they do
+not yet constitute the source-level native binding API. See
+[`FFI.md`](FFI.md) for the first implementation milestones.
 
 ## SDK headers
 

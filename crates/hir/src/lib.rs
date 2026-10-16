@@ -1,6 +1,6 @@
 //! Typed, resolved high-level IR shared by diagnostics, tooling, and backends.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use oche_frontend::{
     Block, ComptimeKind, Expr, Operator, Pattern, Program, SourceSpan, Statement, Type,
@@ -59,6 +59,8 @@ pub enum Error {
         expected: usize,
         actual: usize,
     },
+    #[snafu(display("JSON derivation for '{target}' does not support field type '{ty}'"))]
+    UnsupportedJsonFieldType { target: String, ty: Type },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -409,6 +411,7 @@ fn lower_module_with_package(
     program: &Program,
     package: Option<&LinkedPackage>,
 ) -> Result<TypedProgram, LocatedError> {
+    validate_json_derives(module, program)?;
     let synthetic_functions = synthetic_functions(module, program);
     let checker = Checker {
         module,
@@ -464,6 +467,67 @@ fn lower_module_with_package(
         functions,
         synthetic_functions,
     })
+}
+
+fn validate_json_derives(module: ModuleId, program: &Program) -> Result<(), LocatedError> {
+    for directive in &program.comptime {
+        let ComptimeKind::Generate { function } = &directive.kind else {
+            continue;
+        };
+        if !matches!(
+            function.as_str(),
+            "_oche_generate_json_encode" | "_oche_generate_json_decode"
+        ) {
+            continue;
+        }
+        let Some(structure) = program
+            .structs
+            .iter()
+            .find(|structure| structure.name == directive.target)
+        else {
+            continue;
+        };
+        for field in &structure.fields {
+            if !json_type_supported(&field.ty, program, &mut HashSet::new()) {
+                return Err(LocatedError {
+                    function: FunctionId { module, index: 0 },
+                    span: Some(field.span),
+                    source: Box::new(Error::UnsupportedJsonFieldType {
+                        target: directive.target.clone(),
+                        ty: field.ty.clone(),
+                    }),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_type_supported(ty: &Type, program: &Program, visiting: &mut HashSet<String>) -> bool {
+    let Type::Named { name, arguments } = ty;
+    match (name.as_str(), arguments.as_slice()) {
+        ("Int" | "Float" | "Bool" | "String" | "JsonValue", []) => true,
+        ("List", [element]) => json_type_supported(element, program, visiting),
+        (_, []) => {
+            let Some(structure) = program
+                .structs
+                .iter()
+                .find(|structure| structure.name == *name)
+            else {
+                return false;
+            };
+            if !visiting.insert(name.clone()) {
+                return false;
+            }
+            let supported = structure
+                .fields
+                .iter()
+                .all(|field| json_type_supported(&field.ty, program, visiting));
+            visiting.remove(name);
+            supported
+        }
+        _ => false,
+    }
 }
 
 fn named(name: &str) -> Type {
@@ -892,6 +956,7 @@ impl Checker<'_> {
                 let value = self.expression(value, expected, scope)?;
                 leaf(value.ty.clone(), TypedExprKind::Comptime(Box::new(value)))
             }
+            Expr::Quote(value) | Expr::Splice(value) => self.expression(value, expected, scope)?,
             Expr::Binary {
                 operator,
                 left,

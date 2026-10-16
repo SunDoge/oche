@@ -31,7 +31,7 @@ expected = '{"name":"Ada","age":37}'
 assert cli_run("encode_user", "Ada", "37") == expected
 assert cli_run("round_trip", expected) == expected
 assert cli_run("round_trip", '{"name":7,"age":37}') == (
-    "Expected a JSON string"
+    "Expected a string at $.name"
 )
 assert cli_run("validate_user", "Ada", "37") == expected
 assert cli_run("validate_user", "", "37") == "name must not be empty"
@@ -41,10 +41,10 @@ assert cli_run("struct_age", "Ada", "37") == "37"
 batch = '{"counts":[1,2,3],"labels":[["agent"],["tool","result"]]}'
 assert cli_run("round_trip_batch", batch) == batch
 assert cli_run("round_trip_batch", '{"counts":[1,true],"labels":[]}') == (
-    "Expected a JSON integer"
+    "Expected an integer at $.counts[1]"
 )
 assert cli_run("round_trip_batch", '{"counts":[],"labels":[[1]]}') == (
-    "Expected a JSON string"
+    "Expected a string at $.labels[0][0]"
 )
 envelope = (
     '{"owner":{"name":"Ada","age":37},'
@@ -54,7 +54,7 @@ assert cli_run("round_trip_envelope", envelope) == envelope
 assert cli_run(
     "round_trip_envelope",
     '{"owner":{"name":"Ada","age":"old"},"batches":[]}',
-) == "Expected a JSON integer"
+) == "Expected an integer at $.owner.age"
 
 with tempfile.TemporaryDirectory(prefix="oche-comptime-aot-") as task_dir:
     executable = Path(task_dir) / "comptime-json"

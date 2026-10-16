@@ -779,6 +779,17 @@ OcheResult<Object?, String> _oche_json_field(\n\
     ? OcheOk<Object?, String>(object[name])\n\
     : OcheErr<Object?, String>('Missing JSON field: $name');\n\n",
     );
+    let has_json = modules.iter().any(|module| {
+        module.typed.synthetic_functions.iter().any(|function| {
+            matches!(
+                function.origin,
+                SyntheticOrigin::JsonEncode
+                    | SyntheticOrigin::JsonEncodeValue
+                    | SyntheticOrigin::JsonDecode
+                    | SyntheticOrigin::JsonDecodeValue
+            )
+        })
+    });
     let uses_propagation_runtime = modules.iter().any(|module| {
         module.typed.functions.iter().any(|function| {
             typed_expression_contains(&function.body, TypedExpressionNeedle::PropagationRuntime)
@@ -825,6 +836,192 @@ Future<OcheOption<T>> _ocheTryOptionAsync<T>(Future<T> Function() body) async {\
 }\n\n",
         );
     }
+    if has_json {
+        output.push_str(
+            r#"final class _OcheJsonReader {
+  _OcheJsonReader(this.source);
+  final String source;
+  int index = 0;
+
+  void _space() {
+    while (index < source.length) {
+      final c = source.codeUnitAt(index);
+      if (c != 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) break;
+      index++;
+    }
+  }
+
+  bool _consume(int code) {
+    _space();
+    if (index < source.length && source.codeUnitAt(index) == code) {
+      index++;
+      return true;
+    }
+    return false;
+  }
+
+  void _expect(int code) {
+    if (!_consume(code)) throw FormatException('Invalid JSON', source, index);
+  }
+
+  void beginObject() => _expect(0x7b);
+  bool endObject() => _consume(0x7d);
+  void beginArray() => _expect(0x5b);
+  bool endArray() => _consume(0x5d);
+  void comma() => _expect(0x2c);
+  void colon() => _expect(0x3a);
+
+  String string(String path) {
+    _space();
+    final start = index;
+    if (index >= source.length || source.codeUnitAt(index) != 0x22) {
+      return _ocheJsonExpected(path, 'a string');
+    }
+    index++;
+    var escaped = false;
+    while (index < source.length) {
+      final code = source.codeUnitAt(index++);
+      if (code == 0x5c) {
+        escaped = true;
+        if (index >= source.length) throw FormatException('Invalid JSON', source, index);
+        index++;
+      } else if (code == 0x22) {
+        return escaped
+            ? jsonDecode(source.substring(start, index)) as String
+            : source.substring(start + 1, index - 1);
+      } else if (code < 0x20) {
+        throw FormatException('Invalid JSON', source, index - 1);
+      }
+    }
+    throw FormatException('Invalid JSON', source, start);
+  }
+
+  String _numberToken(String path, String expected) {
+    _space();
+    final start = index;
+    if (index < source.length && source.codeUnitAt(index) == 0x2d) index++;
+    if (index >= source.length) return _ocheJsonExpected(path, expected);
+    var code = source.codeUnitAt(index);
+    if (code == 0x30) {
+      index++;
+      if (index < source.length) {
+        code = source.codeUnitAt(index);
+        if (code >= 0x30 && code <= 0x39) {
+          throw FormatException('Invalid JSON', source, index);
+        }
+      }
+    } else if (code >= 0x31 && code <= 0x39) {
+      do {
+        index++;
+        if (index >= source.length) break;
+        code = source.codeUnitAt(index);
+      } while (code >= 0x30 && code <= 0x39);
+    } else {
+      return _ocheJsonExpected(path, expected);
+    }
+    if (index < source.length && source.codeUnitAt(index) == 0x2e) {
+      index++;
+      final fraction = index;
+      while (index < source.length) {
+        code = source.codeUnitAt(index);
+        if (code < 0x30 || code > 0x39) break;
+        index++;
+      }
+      if (fraction == index) throw FormatException('Invalid JSON', source, index);
+    }
+    if (index < source.length &&
+        (source.codeUnitAt(index) == 0x65 || source.codeUnitAt(index) == 0x45)) {
+      index++;
+      if (index < source.length &&
+          (source.codeUnitAt(index) == 0x2b || source.codeUnitAt(index) == 0x2d)) index++;
+      final exponent = index;
+      while (index < source.length) {
+        code = source.codeUnitAt(index);
+        if (code < 0x30 || code > 0x39) break;
+        index++;
+      }
+      if (exponent == index) throw FormatException('Invalid JSON', source, index);
+    }
+    return source.substring(start, index);
+  }
+
+  int integer(String path) {
+    final token = _numberToken(path, 'an integer');
+    if (token.contains('.') || token.contains('e') || token.contains('E')) {
+      return _ocheJsonExpected(path, 'an integer');
+    }
+    return int.parse(token);
+  }
+
+  double floating(String path) {
+    final token = _numberToken(path, 'a float');
+    if (!token.contains('.') && !token.contains('e') && !token.contains('E')) {
+      return _ocheJsonExpected(path, 'a float');
+    }
+    final value = double.parse(token);
+    if (!value.isFinite) return _ocheJsonExpected(path, 'a float');
+    return value;
+  }
+
+  bool boolean(String path) {
+    _space();
+    if (source.startsWith('true', index)) { index += 4; return true; }
+    if (source.startsWith('false', index)) { index += 5; return false; }
+    return _ocheJsonExpected(path, 'a boolean');
+  }
+
+  List<T> list<T>(String path, T Function(_OcheJsonReader, String) decode) {
+    beginArray();
+    final values = <T>[];
+    var first = true;
+    while (!endArray()) {
+      if (!first) comma();
+      values.add(decode(this, '$path[${values.length}]'));
+      first = false;
+    }
+    return values;
+  }
+
+  Object? dynamicValue(String path) {
+    _space();
+    if (index >= source.length) throw FormatException('Invalid JSON', source, index);
+    final code = source.codeUnitAt(index);
+    if (code == 0x22) return string(path);
+    if (code == 0x7b) {
+      beginObject();
+      final value = <String, Object?>{};
+      var first = true;
+      while (!endObject()) {
+        if (!first) comma();
+        final key = string(path);
+        colon();
+        value[key] = dynamicValue('$path.$key');
+        first = false;
+      }
+      return value;
+    }
+    if (code == 0x5b) return list<Object?>(path, (reader, itemPath) => reader.dynamicValue(itemPath));
+    if (source.startsWith('true', index) || source.startsWith('false', index)) return boolean(path);
+    if (source.startsWith('null', index)) { index += 4; return null; }
+    final token = _numberToken(path, 'a JSON value');
+    final num value = token.contains('.') || token.contains('e') || token.contains('E')
+        ? double.parse(token)
+        : int.parse(token);
+    if (!value.isFinite) throw FormatException('Invalid JSON', source, index);
+    return value;
+  }
+
+  void skipValue(String path) { dynamicValue(path); }
+
+  void finish() {
+    _space();
+    if (index != source.length) throw FormatException('Invalid JSON', source, index);
+  }
+}
+
+"#,
+        );
+    }
     output.push_str(
         "OcheOption<T> _ocheListLast<T>(List<T> values) =>\n\
   values.isEmpty ? OcheNone<T>() : OcheSome<T>(values.last);\n\n",
@@ -835,12 +1032,410 @@ Future<OcheOption<T>> _ocheTryOptionAsync<T>(Future<T> Function() body) async {\
 List<T> _ocheListRest<T>(List<T> values) =>\n\
   values.isEmpty ? <T>[] : values.sublist(1);\n\n",
     );
+    if has_json {
+        output.push_str(
+            "final class _OcheJsonDecodeFailure implements Exception {\n\
+  const _OcheJsonDecodeFailure(this.message);\n\
+  final String message;\n\
+}\n\
+Never _ocheJsonExpected(String path, String expected) =>\n\
+  throw _OcheJsonDecodeFailure('Expected $expected at $path');\n\
+int _ocheJsonInt(Object? value, String path) =>\n\
+  value is int ? value : _ocheJsonExpected(path, 'an integer');\n\
+double _ocheJsonFloat(Object? value, String path) =>\n\
+  value is double ? value : _ocheJsonExpected(path, 'a float');\n\
+bool _ocheJsonBool(Object? value, String path) =>\n\
+  value is bool ? value : _ocheJsonExpected(path, 'a boolean');\n\
+String _ocheJsonString(Object? value, String path) =>\n\
+  value is String ? value : _ocheJsonExpected(path, 'a string');\n\
+List<T> _ocheJsonList<T>(Object? value, String path, T Function(Object?, String) decode) {\n\
+  if (value is! List<Object?>) _ocheJsonExpected(path, 'an array');\n\
+  return <T>[for (var i = 0; i < value.length; i++) decode(value[i], '$path[$i]')];\n\
+}\n\n",
+        );
+    }
     for module in modules {
         emit_structs(&mut output, module.id, module.program);
+        emit_json_codecs(&mut output, module.id, module.program, module.typed);
         emit_comptime(&mut output, module.id, module.program, module.comptime);
         emit_functions(&mut output, module.program, module.typed);
     }
     output
+}
+
+fn emit_json_codecs(
+    output: &mut String,
+    module: ModuleId,
+    program: &Program,
+    typed: &TypedProgram,
+) {
+    let uses_json = typed.synthetic_functions.iter().any(|function| {
+        matches!(
+            function.origin,
+            SyntheticOrigin::JsonEncode
+                | SyntheticOrigin::JsonEncodeValue
+                | SyntheticOrigin::JsonDecode
+                | SyntheticOrigin::JsonDecodeValue
+        )
+    });
+    if !uses_json {
+        return;
+    }
+    for (struct_index, structure) in program.structs.iter().enumerate() {
+        let requested = typed.synthetic_functions.iter().any(|function| {
+            function.structure.index == struct_index
+                && matches!(
+                    function.origin,
+                    SyntheticOrigin::JsonEncode
+                        | SyntheticOrigin::JsonEncodeValue
+                        | SyntheticOrigin::JsonDecode
+                        | SyntheticOrigin::JsonDecodeValue
+                )
+        });
+        if !requested {
+            continue;
+        }
+        let dart_type = struct_name(module, struct_index);
+        let to_value = json_to_value_name(module, struct_index);
+        let from_raw = generated_name(
+            module,
+            "_ocheJsonDecode",
+            "_ocheModuleJsonDecode",
+            struct_index,
+        );
+        writeln!(
+            output,
+            "Object? {to_value}({dart_type} value) => <String, Object?>{{"
+        )
+        .unwrap();
+        for (field_index, field) in structure.fields.iter().enumerate() {
+            output.push_str("  ");
+            emit_string(output, &field.name);
+            output.push_str(": ");
+            emit_json_encode_value(
+                output,
+                module,
+                program,
+                &field.ty,
+                &format!("value.f{field_index}"),
+            );
+            output.push_str(",\n");
+        }
+        output.push_str("};\n");
+        let writer = json_write_name(module, struct_index);
+        writeln!(
+            output,
+            "void {writer}(StringBuffer sink, {dart_type} value) {{"
+        )
+        .unwrap();
+        output.push_str("  sink.write('{');\n");
+        for (field_index, field) in structure.fields.iter().enumerate() {
+            let prefix = if field_index == 0 {
+                format!("\"{}\":", field.name)
+            } else {
+                format!(",\"{}\":", field.name)
+            };
+            output.push_str("  sink.write(");
+            emit_string(output, &prefix);
+            output.push_str(");\n");
+            emit_json_write_value(
+                output,
+                module,
+                program,
+                &field.ty,
+                &format!("value.f{field_index}"),
+                1,
+            );
+        }
+        output.push_str("  sink.write('}');\n}\n");
+        writeln!(
+            output,
+            "String {}({dart_type} value) {{ final sink = StringBuffer(); {writer}(sink, value); return sink.toString(); }}",
+            json_to_name(module, struct_index)
+        )
+        .unwrap();
+
+        writeln!(
+            output,
+            "{dart_type} {from_raw}(Object? value, String path) {{"
+        )
+        .unwrap();
+        output.push_str(
+            "  if (value is! Map<String, Object?>) _ocheJsonExpected(path, 'an object');\n",
+        );
+        for (field_index, field) in structure.fields.iter().enumerate() {
+            output.push_str("  if (!value.containsKey(");
+            emit_string(output, &field.name);
+            output.push_str(")) throw _OcheJsonDecodeFailure('Missing JSON field: ");
+            output.push_str(&field.name.replace('\\', "\\\\").replace('\'', "\\'"));
+            output.push_str("');\n  final f");
+            write!(output, "{field_index} = ").unwrap();
+            emit_json_decode_value(
+                output,
+                module,
+                program,
+                &field.ty,
+                &format!("value[{}]", dart_string(&field.name)),
+                &format!(
+                    "'$path.{}'",
+                    field.name.replace('\\', "\\\\").replace('\'', "\\'")
+                ),
+            );
+            output.push_str(";\n");
+        }
+        writeln!(output, "  return {dart_type}(").unwrap();
+        for field_index in 0..structure.fields.len() {
+            writeln!(output, "    f{field_index}: f{field_index},").unwrap();
+        }
+        output.push_str("  );\n}\n");
+
+        let reader_name = json_read_name(module, struct_index);
+        writeln!(
+            output,
+            "{dart_type} {reader_name}(_OcheJsonReader reader, String path) {{"
+        )
+        .unwrap();
+        for (field_index, field) in structure.fields.iter().enumerate() {
+            output.push_str("  late ");
+            emit_type(output, module, program, &field.ty);
+            writeln!(output, " f{field_index};\n  var has{field_index} = false;").unwrap();
+        }
+        output.push_str(
+            "  reader.beginObject();\n  var first = true;\n  while (!reader.endObject()) {\n    if (!first) reader.comma();\n    final key = reader.string(path);\n    reader.colon();\n    switch (key) {\n",
+        );
+        for (field_index, field) in structure.fields.iter().enumerate() {
+            output.push_str("      case ");
+            emit_string(output, &field.name);
+            output.push_str(":\n        f");
+            write!(output, "{field_index} = ").unwrap();
+            emit_json_read_value(
+                output,
+                module,
+                program,
+                &field.ty,
+                "reader",
+                &format!(
+                    "'$path.{}'",
+                    field.name.replace('\\', "\\\\").replace('\'', "\\'")
+                ),
+            );
+            writeln!(
+                output,
+                ";\n        has{field_index} = true;\n        break;"
+            )
+            .unwrap();
+        }
+        output.push_str(
+            "      default:\n        reader.skipValue('$path.$key');\n    }\n    first = false;\n  }\n",
+        );
+        for (field_index, field) in structure.fields.iter().enumerate() {
+            write!(
+                output,
+                "  if (!has{field_index}) throw const _OcheJsonDecodeFailure("
+            )
+            .unwrap();
+            emit_string(output, &format!("Missing JSON field: {}", field.name));
+            output.push_str(");\n");
+        }
+        writeln!(output, "  return {dart_type}(").unwrap();
+        for field_index in 0..structure.fields.len() {
+            writeln!(output, "    f{field_index}: f{field_index},").unwrap();
+        }
+        output.push_str("  );\n}\n");
+
+        let from_value = json_from_value_name(module, struct_index);
+        writeln!(
+            output,
+            "OcheResult<{dart_type}, String> {from_value}(Object? value) {{"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "  try {{ return OcheOk<{dart_type}, String>({from_raw}(value, r'$')); }}"
+        )
+        .unwrap();
+        writeln!(output, "  on _OcheJsonDecodeFailure catch (error) {{ return OcheErr<{dart_type}, String>(error.message); }}").unwrap();
+        output.push_str("}\n");
+        writeln!(
+            output,
+            "OcheResult<{dart_type}, String> {}(String source) {{",
+            json_from_name(module, struct_index)
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "  try {{ final reader = _OcheJsonReader(source); final value = {reader_name}(reader, r'$'); reader.finish(); return OcheOk<{dart_type}, String>(value); }}"
+        )
+        .unwrap();
+        writeln!(output, "  on _OcheJsonDecodeFailure catch (error) {{ return OcheErr<{dart_type}, String>(error.message); }}").unwrap();
+        writeln!(
+            output,
+            "  on FormatException {{ return OcheErr<{dart_type}, String>('Invalid JSON'); }}"
+        )
+        .unwrap();
+        output.push_str("}\n\n");
+    }
+}
+
+fn emit_json_write_value(
+    output: &mut String,
+    module: ModuleId,
+    program: &Program,
+    ty: &Type,
+    value: &str,
+    depth: usize,
+) {
+    let indent = "  ".repeat(depth);
+    let Type::Named { name, arguments } = ty;
+    match (name.as_str(), arguments.as_slice()) {
+        ("Int" | "Bool", []) => {
+            writeln!(output, "{indent}sink.write({value});").unwrap();
+        }
+        ("Float" | "String" | "JsonValue", []) => {
+            writeln!(output, "{indent}sink.write(jsonEncode({value}));").unwrap();
+        }
+        ("List", [element]) => {
+            let index = format!("jsonIndex{depth}");
+            let item = format!("jsonItem{depth}");
+            writeln!(output, "{indent}sink.write('[');").unwrap();
+            writeln!(
+                output,
+                "{indent}for (var {index} = 0; {index} < {value}.length; {index}++) {{"
+            )
+            .unwrap();
+            writeln!(output, "{indent}  if ({index} != 0) sink.write(',');").unwrap();
+            writeln!(output, "{indent}  final {item} = {value}[{index}];").unwrap();
+            emit_json_write_value(output, module, program, element, &item, depth + 1);
+            writeln!(output, "{indent}}}").unwrap();
+            writeln!(output, "{indent}sink.write(']');").unwrap();
+        }
+        (_, []) => {
+            let index = program
+                .structs
+                .iter()
+                .position(|item| item.name == *name)
+                .expect("JSON field types are validated before code generation");
+            writeln!(
+                output,
+                "{indent}{}(sink, {value});",
+                json_write_name(module, index)
+            )
+            .unwrap();
+        }
+        _ => unreachable!("JSON field types are validated before code generation"),
+    }
+}
+
+fn emit_json_read_value(
+    output: &mut String,
+    module: ModuleId,
+    program: &Program,
+    ty: &Type,
+    reader: &str,
+    path: &str,
+) {
+    let Type::Named { name, arguments } = ty;
+    match (name.as_str(), arguments.as_slice()) {
+        ("Int", []) => write!(output, "{reader}.integer({path})").unwrap(),
+        ("Float", []) => write!(output, "{reader}.floating({path})").unwrap(),
+        ("Bool", []) => write!(output, "{reader}.boolean({path})").unwrap(),
+        ("String", []) => write!(output, "{reader}.string({path})").unwrap(),
+        ("JsonValue", []) => write!(output, "{reader}.dynamicValue({path})").unwrap(),
+        ("List", [element]) => {
+            write!(output, "{reader}.list({path}, (itemReader, itemPath) => ").unwrap();
+            emit_json_read_value(output, module, program, element, "itemReader", "itemPath");
+            output.push(')');
+        }
+        (_, []) => {
+            let index = program
+                .structs
+                .iter()
+                .position(|item| item.name == *name)
+                .expect("JSON field types are validated before code generation");
+            write!(
+                output,
+                "{}({reader}, {path})",
+                json_read_name(module, index)
+            )
+            .unwrap();
+        }
+        _ => unreachable!("JSON field types are validated before code generation"),
+    }
+}
+
+fn dart_string(value: &str) -> String {
+    let mut output = String::new();
+    emit_string(&mut output, value);
+    output
+}
+
+fn emit_json_encode_value(
+    output: &mut String,
+    module: ModuleId,
+    program: &Program,
+    ty: &Type,
+    value: &str,
+) {
+    let Type::Named { name, arguments } = ty;
+    match (name.as_str(), arguments.as_slice()) {
+        ("Int" | "Float" | "Bool" | "String" | "JsonValue", []) => output.push_str(value),
+        ("List", [element]) => {
+            output.push_str(value);
+            output.push_str(".map((item) => ");
+            emit_json_encode_value(output, module, program, element, "item");
+            output.push_str(").toList()");
+        }
+        (_, []) => {
+            let index = program
+                .structs
+                .iter()
+                .position(|item| item.name == *name)
+                .expect("JSON field types are validated before code generation");
+            write!(output, "{}({value})", json_to_value_name(module, index)).unwrap();
+        }
+        _ => unreachable!("JSON field types are validated before code generation"),
+    }
+}
+
+fn emit_json_decode_value(
+    output: &mut String,
+    module: ModuleId,
+    program: &Program,
+    ty: &Type,
+    value: &str,
+    path: &str,
+) {
+    let Type::Named { name, arguments } = ty;
+    match (name.as_str(), arguments.as_slice()) {
+        ("Int", []) => write!(output, "_ocheJsonInt({value}, {path})").unwrap(),
+        ("Float", []) => write!(output, "_ocheJsonFloat({value}, {path})").unwrap(),
+        ("Bool", []) => write!(output, "_ocheJsonBool({value}, {path})").unwrap(),
+        ("String", []) => write!(output, "_ocheJsonString({value}, {path})").unwrap(),
+        ("JsonValue", []) => output.push_str(value),
+        ("List", [element]) => {
+            write!(
+                output,
+                "_ocheJsonList({value}, {path}, (item, itemPath) => "
+            )
+            .unwrap();
+            emit_json_decode_value(output, module, program, element, "item", "itemPath");
+            output.push(')');
+        }
+        (_, []) => {
+            let index = program
+                .structs
+                .iter()
+                .position(|item| item.name == *name)
+                .expect("JSON field types are validated before code generation");
+            write!(
+                output,
+                "{}({value}, {path})",
+                generated_name(module, "_ocheJsonDecode", "_ocheModuleJsonDecode", index)
+            )
+            .unwrap();
+        }
+        _ => unreachable!("JSON field types are validated before code generation"),
+    }
 }
 
 fn emit_functions(output: &mut String, program: &Program, typed: &TypedProgram) {
@@ -978,6 +1573,14 @@ fn json_to_name(module: ModuleId, index: usize) -> String {
 
 fn json_to_value_name(module: ModuleId, index: usize) -> String {
     generated_name(module, "ocheJsonToValue", "ocheModuleJsonToValue", index)
+}
+
+fn json_write_name(module: ModuleId, index: usize) -> String {
+    generated_name(module, "_ocheJsonWrite", "_ocheModuleJsonWrite", index)
+}
+
+fn json_read_name(module: ModuleId, index: usize) -> String {
+    generated_name(module, "_ocheJsonRead", "_ocheModuleJsonRead", index)
 }
 
 fn json_from_name(module: ModuleId, index: usize) -> String {

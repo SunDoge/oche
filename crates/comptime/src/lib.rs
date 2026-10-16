@@ -229,6 +229,12 @@ pub fn vm_requests(program: &Program) -> Result<Vec<VmRequest>, Error> {
         let ComptimeKind::Generate { function: name } = &directive.kind else {
             continue;
         };
+        if matches!(
+            name.as_str(),
+            "_oche_generate_json_encode" | "_oche_generate_json_decode"
+        ) {
+            continue;
+        }
         let Some(&(index, function)) = functions.get(name.as_str()) else {
             return Err(Error::InvalidExpression {
                 offset: directive.span.start,
@@ -348,6 +354,8 @@ fn collect_vm_requests(
         Expr::Field { value, .. }
         | Expr::Negate(value)
         | Expr::Await(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value)
         | Expr::Propagate(value) => {
             collect_vm_requests(value, offset, functions, structs, requests)
         }
@@ -943,6 +951,8 @@ fn replace_vm_values(
         Expr::Field { value, .. }
         | Expr::Negate(value)
         | Expr::Await(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value)
         | Expr::Propagate(value) => replace_vm_values(value, results, next_request, offset),
         Expr::Binary { left, right, .. } => {
             replace_vm_values(left, results, next_request, offset)?;
@@ -1117,7 +1127,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schedules_separate_oche_json_generators() {
+    fn keeps_json_derivation_out_of_the_vm_comptime_queue() {
         let program = oche_frontend::parse(
             "struct User { name: String, age: Int, tags: List<List<String>> }
              comptime jsonEncode(User)
@@ -1126,23 +1136,20 @@ mod tests {
         )
         .unwrap();
         let requests = vm_requests(&program).unwrap();
-        assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].name, "_oche_generate_json_encode");
-        assert_eq!(requests[1].name, "_oche_generate_json_decode");
+        assert!(requests.is_empty());
         let output = evaluate(&program).unwrap();
         assert_eq!(output.validators[0].rules.len(), 2);
     }
 
     #[test]
-    fn schedules_only_the_requested_json_direction() {
+    fn leaves_each_json_direction_to_compiler_owned_derivation() {
         let encode = oche_frontend::parse(
             "struct Sample { score: Float, values: List<Float> }
              comptime jsonEncode(Sample)",
         )
         .unwrap();
         let encode_requests = vm_requests(&encode).unwrap();
-        assert_eq!(encode_requests.len(), 1);
-        assert_eq!(encode_requests[0].name, "_oche_generate_json_encode");
+        assert!(encode_requests.is_empty());
 
         let decode = oche_frontend::parse(
             "struct Sample { score: Float, values: List<Float> }
@@ -1150,12 +1157,11 @@ mod tests {
         )
         .unwrap();
         let decode_requests = vm_requests(&decode).unwrap();
-        assert_eq!(decode_requests.len(), 1);
-        assert_eq!(decode_requests[0].name, "_oche_generate_json_decode");
+        assert!(decode_requests.is_empty());
     }
 
     #[test]
-    fn schedules_nested_structs_and_lists_through_oche() {
+    fn leaves_nested_json_derivation_out_of_vm_comptime() {
         let program = oche_frontend::parse(
             "struct Child { value: Int }
              struct Parent { primary: Child, children: List<Child> }
@@ -1166,9 +1172,7 @@ mod tests {
         )
         .unwrap();
         let requests = vm_requests(&program).unwrap();
-        assert_eq!(requests.len(), 4);
-        assert_eq!(requests[2].name, "_oche_generate_json_encode");
-        assert_eq!(requests[3].name, "_oche_generate_json_decode");
+        assert!(requests.is_empty());
     }
 
     #[test]

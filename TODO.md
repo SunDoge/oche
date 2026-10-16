@@ -5,6 +5,56 @@ in this file are design notes, not commitments for the 0.1 grammar. A deferred
 feature should only move into the language after ordinary Oche code exposes a
 repeated problem that the feature clearly solves.
 
+## Native FFI foundation
+
+FFI is required for 0.1 rather than deferred language work. Keep it as a thin
+typed lowering to `dart:ffi`, and build it as small end-to-end increments, each
+covered in both Dart VM JIT and AOT:
+
+1. Define native modules, library resolution, symbol names, exact scalar ABI
+   types, and clear diagnostics; reject them on the JavaScript target.
+2. Add borrowed byte buffers and UTF-8 input adapters whose lifetime is one
+   native call.
+3. Add opaque handles with explicit create/destroy functions and wrappers that
+   prevent ordinary Oche code from manufacturing handles.
+4. Add owned native output buffers with required release functions and status
+   code to `Result` wrappers.
+5. Generate bindings from C headers using `ffigen`, and document a
+   `cbindgen`-based Rust crate workflow.
+
+Do not begin with callbacks, variadics, arbitrary pointer arithmetic, inferred
+ownership, structs passed by value, unions, or bitfields. Do not automatically
+move a blocking FFI call to another isolate; make that scheduling choice visible
+in Oche code.
+
+## Staged metaprogramming
+
+Stage 0 is implemented as `splice quote { expression }`. The first local code
+value is also available as `let code = quote { expression }; splice code`.
+These forms parse a bounded expression or expression block into the ordinary AST
+and remove all code values before name resolution and type checking. Code values
+are immutable, lexically scoped, reusable, and compile-time only. They cannot
+cross function boundaries, enter runtime data, execute generators, or produce
+declarations.
+
+Revisit Oche programs generating Oche programs after the 0.1 type system, LSP,
+and module model are stable. Dart's shared JIT and AOT semantics remain the main
+reason to explore this: compile-time Oche could execute on the Dart VM and emit
+code consumed by the same backend.
+
+Do not expose the current `ComptimeDeclarations` protocol as a user API. A
+public design must first settle phase ordering, hygienic names, typed reflection,
+capability isolation, deterministic dependency tracking, execution budgets,
+cancellation, caching, expansion source maps, and identical CLI/LSP behavior.
+Compiler-owned JSON, validation, schema, and interop derivations can cover common
+0.1 needs without committing the language to a general macro model.
+
+The next useful experiment is making `Code<T>` explicit in function signatures
+so generators can compose code values. That requires definition-site hygiene,
+typed quote checking independent of a splice context, and a rule for transporting
+captured values. The local form deliberately uses splice-site name resolution
+until those rules exist.
+
 ## `tsx!` syntax island
 
 Explore a compiler-provided `tsx! { ... }` expression for typed prompt trees:

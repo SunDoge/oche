@@ -59,7 +59,7 @@
     "keywords": {
       "patterns": [
         { "name": "keyword.control.oche", "match": "\\b(?:match|try|if|else|for|while|return)\\b" },
-        { "name": "storage.modifier.oche", "match": "\\b(?:comptime|const|test|async|await|let|mut|struct|enum|pub|import|dart|as)\\b" },
+        { "name": "storage.modifier.oche", "match": "\\b(?:comptime|const|test|async|await|let|mut|struct|enum|pub|import|dart|as|splice|quote)\\b" },
         { "name": "keyword.operator.propagation.oche", "match": "\\?" },
         { "name": "constant.language.boolean.oche", "match": "\\b(?:true|false)\\b" }
       ]

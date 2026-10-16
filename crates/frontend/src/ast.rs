@@ -286,6 +286,8 @@ pub enum Expr {
     Negate(Box<Expr>),
     Await(Box<Expr>),
     Comptime(Box<Expr>),
+    Quote(Box<Expr>),
+    Splice(Box<Expr>),
     Binary {
         operator: Operator,
         left: Box<Expr>,
@@ -333,6 +335,8 @@ impl Expr {
             Self::Field { value, .. }
             | Self::Negate(value)
             | Self::Comptime(value)
+            | Self::Quote(value)
+            | Self::Splice(value)
             | Self::Propagate(value) => value.first_await_span(),
             Self::Binary { left, right, .. } => {
                 left.first_await_span().or_else(|| right.first_await_span())

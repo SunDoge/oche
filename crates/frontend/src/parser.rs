@@ -106,6 +106,12 @@ pub enum Error {
     AwaitOutsideAsync { offset: usize },
     #[snafu(display("Prefix 'await' is not supported; write 'expression.await'"))]
     PrefixAwait { offset: usize },
+    #[snafu(display("'quote' must be consumed by 'splice' or bound with immutable 'let'"))]
+    QuoteOutsideSplice { offset: usize },
+    #[snafu(display("'splice' requires a quoted expression or a local Code value"))]
+    InvalidSplice { offset: usize },
+    #[snafu(display("Unknown local Code value '{name}'"))]
+    UnknownCodeValue { offset: usize, name: String },
     #[snafu(display("Test function '{name}' cannot be public"))]
     PublicTest { offset: usize, name: String },
     #[snafu(display("Test function '{name}' cannot have parameters"))]
@@ -156,10 +162,13 @@ impl Error {
             | Self::UnknownModuleFunction { offset, .. } => *offset,
             Self::AwaitOutsideAsync { offset }
             | Self::PrefixAwait { offset }
+            | Self::QuoteOutsideSplice { offset }
+            | Self::InvalidSplice { offset }
             | Self::PublicTest { offset, .. }
             | Self::TestParameters { offset, .. }
             | Self::TestResult { offset, .. } => *offset,
             Self::MutablePattern { offset } | Self::ImmutableAssignment { offset, .. } => *offset,
+            Self::UnknownCodeValue { offset, .. } => *offset,
         }
     }
 }
@@ -453,6 +462,8 @@ impl Parser {
                         | "async"
                         | "const"
                         | "await"
+                        | "quote"
+                        | "splice"
                         | "if"
                         | "match"
                         | "true"
@@ -939,6 +950,19 @@ impl Parser {
         } else if self.token().kind == Kind::Name("comptime".into()) {
             self.at += 1;
             Expr::Comptime(Box::new(self.expression(3, depth + 1)?))
+        } else if self.token().kind == Kind::Name("splice".into()) {
+            self.at += 1;
+            Expr::Splice(Box::new(self.expression(3, depth + 1)?))
+        } else if self.token().kind == Kind::Name("quote".into()) {
+            self.at += 1;
+            self.expect(Kind::LeftBrace)?;
+            let block = self.block(depth + 1)?;
+            let expression = if block.statements.is_empty() {
+                *block.tail
+            } else {
+                Expr::Block(block)
+            };
+            Expr::Quote(Box::new(expression))
         } else if self.token().kind == Kind::Name("type".into()) {
             self.at += 1;
             let (_, ty) = self.ty()?;
@@ -1408,13 +1432,13 @@ pub fn parse_recovering(source: &str) -> ParseOutput {
             parser.recover_top_level(declaration_start);
         }
     }
-    if diagnostics.is_empty() {
-        attach_json_call_generators(&imports, &structs, &functions, &mut comptime);
-    }
     if diagnostics.is_empty()
-        && let Err(error) = attach_json_stdlib(&mut structs, &mut functions, &mut comptime)
+        && let Err(error) = expand_generated_expressions(&mut functions)
     {
         diagnostics.push(error);
+    }
+    if diagnostics.is_empty() {
+        attach_json_call_generators(&imports, &structs, &functions, &mut comptime);
     }
     structs.extend(comptime_ir_structs());
     if diagnostics.is_empty()
@@ -1440,6 +1464,233 @@ pub fn parse_recovering(source: &str) -> ParseOutput {
         }),
         diagnostics,
     }
+}
+
+fn expand_generated_expressions(functions: &mut [Function]) -> Result<(), Error> {
+    for function in functions {
+        let body = std::mem::replace(&mut function.body, Expr::Integer(0));
+        function.body = expand_generated_expression(body, &mut HashMap::new())?;
+    }
+    Ok(())
+}
+
+fn expand_generated_expression(
+    expression: Expr,
+    code_values: &mut HashMap<String, Expr>,
+) -> Result<Expr, Error> {
+    match expression {
+        Expr::Located { span, value } => {
+            let value = match *value {
+                Expr::Splice(operand) => {
+                    let quoted = match quoted_expression(*operand) {
+                        Ok(quoted) => quoted,
+                        Err(Expr::Variable(name)) => {
+                            code_values
+                                .get(&name)
+                                .cloned()
+                                .ok_or(Error::UnknownCodeValue {
+                                    offset: span.start,
+                                    name,
+                                })?
+                        }
+                        Err(_) => return Err(Error::InvalidSplice { offset: span.start }),
+                    };
+                    expand_generated_expression(quoted, code_values)?
+                }
+                Expr::Quote(_) => {
+                    return Err(Error::QuoteOutsideSplice { offset: span.start });
+                }
+                value => expand_generated_expression_unlocated(value, code_values)?,
+            };
+            Ok(Expr::Located {
+                span,
+                value: Box::new(value),
+            })
+        }
+        Expr::Splice(operand) => {
+            let quoted = match quoted_expression(*operand) {
+                Ok(quoted) => quoted,
+                Err(Expr::Variable(name)) => code_values
+                    .get(&name)
+                    .cloned()
+                    .ok_or(Error::UnknownCodeValue { offset: 0, name })?,
+                Err(_) => return Err(Error::InvalidSplice { offset: 0 }),
+            };
+            expand_generated_expression(quoted, code_values)
+        }
+        Expr::Quote(_) => Err(Error::QuoteOutsideSplice { offset: 0 }),
+        value => expand_generated_expression_unlocated(value, code_values),
+    }
+}
+
+fn quoted_expression(expression: Expr) -> Result<Expr, Expr> {
+    match expression {
+        Expr::Located { value, .. } => quoted_expression(*value),
+        Expr::Quote(value) => Ok(*value),
+        value => Err(value),
+    }
+}
+
+fn expand_generated_expression_unlocated(
+    expression: Expr,
+    code_values: &mut HashMap<String, Expr>,
+) -> Result<Expr, Error> {
+    Ok(match expression {
+        Expr::List(values) => Expr::List(
+            values
+                .into_iter()
+                .map(|value| expand_generated_expression(value, code_values))
+                .collect::<Result<_, _>>()?,
+        ),
+        Expr::Call { callee, arguments } => Expr::Call {
+            callee,
+            arguments: arguments
+                .into_iter()
+                .map(|value| expand_generated_expression(value, code_values))
+                .collect::<Result<_, _>>()?,
+        },
+        Expr::QualifiedCall {
+            module,
+            name,
+            arguments,
+        } => Expr::QualifiedCall {
+            module,
+            name,
+            arguments: arguments
+                .into_iter()
+                .map(|value| expand_generated_expression(value, code_values))
+                .collect::<Result<_, _>>()?,
+        },
+        Expr::DotCall {
+            receiver,
+            name,
+            arguments,
+        } => Expr::DotCall {
+            receiver: Box::new(expand_generated_expression(*receiver, code_values)?),
+            name,
+            arguments: arguments
+                .into_iter()
+                .map(|value| expand_generated_expression(value, code_values))
+                .collect::<Result<_, _>>()?,
+        },
+        Expr::StructLiteral { name, fields } => Expr::StructLiteral {
+            name,
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| Ok((name, expand_generated_expression(value, code_values)?)))
+                .collect::<Result<_, Error>>()?,
+        },
+        Expr::Field { value, name } => Expr::Field {
+            value: Box::new(expand_generated_expression(*value, code_values)?),
+            name,
+        },
+        Expr::Negate(value) => {
+            Expr::Negate(Box::new(expand_generated_expression(*value, code_values)?))
+        }
+        Expr::Await(value) => {
+            Expr::Await(Box::new(expand_generated_expression(*value, code_values)?))
+        }
+        Expr::Comptime(value) => {
+            Expr::Comptime(Box::new(expand_generated_expression(*value, code_values)?))
+        }
+        Expr::Binary {
+            operator,
+            left,
+            right,
+        } => Expr::Binary {
+            operator,
+            left: Box::new(expand_generated_expression(*left, code_values)?),
+            right: Box::new(expand_generated_expression(*right, code_values)?),
+        },
+        Expr::Match {
+            offset,
+            value,
+            arms,
+        } => Expr::Match {
+            offset,
+            value: Box::new(expand_generated_expression(*value, code_values)?),
+            arms: arms
+                .into_iter()
+                .map(|arm| {
+                    Ok(MatchArm {
+                        offset: arm.offset,
+                        pattern: arm.pattern,
+                        guard: arm
+                            .guard
+                            .map(|guard| expand_generated_expression(guard, code_values))
+                            .transpose()?,
+                        body: expand_generated_expression(arm.body, code_values)?,
+                    })
+                })
+                .collect::<Result<_, Error>>()?,
+        },
+        Expr::Block(block) => {
+            let block = expand_generated_block(block, code_values)?;
+            if block.statements.is_empty() {
+                *block.tail
+            } else {
+                Expr::Block(block)
+            }
+        }
+        Expr::Try(block) => Expr::Try(expand_generated_block(block, code_values)?),
+        Expr::Propagate(value) => {
+            Expr::Propagate(Box::new(expand_generated_expression(*value, code_values)?))
+        }
+        Expr::Located { .. } | Expr::Quote(_) | Expr::Splice(_) => {
+            return expand_generated_expression(expression, code_values);
+        }
+        value @ (Expr::Integer(_)
+        | Expr::Float(_)
+        | Expr::Boolean(_)
+        | Expr::String(_)
+        | Expr::TypeValue(_)
+        | Expr::Variable(_)) => value,
+    })
+}
+
+fn expand_generated_block(
+    block: Block,
+    inherited_code_values: &HashMap<String, Expr>,
+) -> Result<Block, Error> {
+    let mut code_values = inherited_code_values.clone();
+    let mut statements = Vec::new();
+    for statement in block.statements {
+        match statement {
+            Statement::Let {
+                mutable: false,
+                pattern,
+                value,
+            } if matches!(value.unlocated(), Expr::Quote(_)) => {
+                let Pattern::Binding(name) = pattern.unlocated() else {
+                    return Err(Error::InvalidSplice {
+                        offset: pattern.span().map_or(0, |span| span.start),
+                    });
+                };
+                let quoted = quoted_expression(value).expect("matched a quoted expression");
+                code_values.insert(name.clone(), quoted);
+            }
+            Statement::Let {
+                mutable,
+                pattern,
+                value,
+            } => statements.push(Statement::Let {
+                mutable,
+                pattern,
+                value: expand_generated_expression(value, &mut code_values)?,
+            }),
+            Statement::Assign { name, value } => statements.push(Statement::Assign {
+                name,
+                value: expand_generated_expression(value, &mut code_values)?,
+            }),
+            Statement::Expression(value) => statements.push(Statement::Expression(
+                expand_generated_expression(value, &mut code_values)?,
+            )),
+        }
+    }
+    Ok(Block {
+        statements,
+        tail: Box::new(expand_generated_expression(*block.tail, &mut code_values)?),
+    })
 }
 
 fn attach_json_call_generators(
@@ -1592,6 +1843,8 @@ fn collect_json_call_generators(
         | Expr::Negate(value)
         | Expr::Await(value)
         | Expr::Comptime(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value)
         | Expr::Propagate(value) => {
             collect_json_call_generators(value, aliases, requested, comptime);
         }
@@ -1672,52 +1925,6 @@ fn request_json_generator(
 
 fn function_span_fallback(expression: &Expr) -> SourceSpan {
     SourceSpan::point(expression.offset().unwrap_or(0))
-}
-
-fn attach_json_stdlib(
-    structs: &mut Vec<Struct>,
-    functions: &mut Vec<Function>,
-    comptime: &mut [ComptimeDirective],
-) -> Result<(), Error> {
-    let Some(offset) = comptime.iter().find_map(|directive| {
-        matches!(
-            &directive.kind,
-            ComptimeKind::Generate { function }
-                if function == "_oche_generate_json_encode"
-                    || function == "_oche_generate_json_decode"
-        )
-        .then_some(directive.span.start)
-    }) else {
-        return Ok(());
-    };
-    let mut library = parse(include_str!("../../../stdlib/json.oche"))
-        .expect("the bundled JSON comptime library must parse");
-    library
-        .structs
-        .retain(|structure| !crate::is_comptime_ir_type(&structure.name));
-    if let Some(structure) = library
-        .structs
-        .iter()
-        .find(|library| structs.iter().any(|user| user.name == library.name))
-    {
-        return Err(Error::DuplicateStruct {
-            offset,
-            name: structure.name.clone(),
-        });
-    }
-    if let Some(function) = library
-        .functions
-        .iter()
-        .find(|library| functions.iter().any(|user| user.name == library.name))
-    {
-        return Err(Error::DuplicateFunction {
-            offset,
-            name: function.name.clone(),
-        });
-    }
-    structs.extend(library.structs);
-    functions.extend(library.functions);
-    Ok(())
 }
 
 pub fn parse(source: &str) -> Result<Program, Error> {
@@ -1880,6 +2087,8 @@ pub fn validate_linked(program: &Program) -> Result<(), Error> {
             | Expr::Negate(value)
             | Expr::Await(value)
             | Expr::Comptime(value)
+            | Expr::Quote(value)
+            | Expr::Splice(value)
             | Expr::Propagate(value) => {
                 expression(program, value, offset)?;
             }
@@ -2274,6 +2483,8 @@ fn validate_mutation(
         | Expr::Negate(value)
         | Expr::Await(value)
         | Expr::Comptime(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value)
         | Expr::Propagate(value) => visit!(value, offset),
         Expr::Binary { left, right, .. } => {
             visit!(left, offset)?;
@@ -2477,6 +2688,8 @@ fn validate_expression(
         Expr::Negate(operand)
         | Expr::Await(operand)
         | Expr::Comptime(operand)
+        | Expr::Quote(operand)
+        | Expr::Splice(operand)
         | Expr::Propagate(operand) => {
             validate_expression(operand, functions, enums, imports, scope, offset)
         }
@@ -2685,6 +2898,8 @@ fn validate_struct_usage(
         | Expr::Negate(value)
         | Expr::Await(value)
         | Expr::Comptime(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value)
         | Expr::Propagate(value) => validate_struct_usage(value, structs, offset),
         Expr::Call { callee, arguments } => {
             if structs.iter().any(|structure| structure.name == *callee) {
@@ -2824,7 +3039,9 @@ fn validate_propagation(
         Expr::Field { value, .. }
         | Expr::Negate(value)
         | Expr::Await(value)
-        | Expr::Comptime(value) => validate_propagation(value, returns, expected, offset),
+        | Expr::Comptime(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value) => validate_propagation(value, returns, expected, offset),
         Expr::Binary { left, right, .. } => {
             validate_propagation(left, returns, expected, offset)?;
             validate_propagation(right, returns, expected, offset)
@@ -2939,7 +3156,9 @@ fn collect_expression_carriers<'a>(
         Expr::Field { value, .. }
         | Expr::Negate(value)
         | Expr::Await(value)
-        | Expr::Comptime(value) => {
+        | Expr::Comptime(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value) => {
             collect_expression_carriers(value, returns, carriers);
         }
         Expr::Binary { left, right, .. } => {
@@ -2979,7 +3198,9 @@ fn expression_contains_propagate(expression: &Expr) -> bool {
         Expr::Field { value, .. }
         | Expr::Negate(value)
         | Expr::Await(value)
-        | Expr::Comptime(value) => expression_contains_propagate(value),
+        | Expr::Comptime(value)
+        | Expr::Quote(value)
+        | Expr::Splice(value) => expression_contains_propagate(value),
         Expr::Binary { left, right, .. } => {
             expression_contains_propagate(left) || expression_contains_propagate(right)
         }
@@ -3119,6 +3340,50 @@ mod tests {
                 end: source.find("comptime capacity()").unwrap() + "comptime capacity()".len(),
             })
         );
+    }
+
+    #[test]
+    fn expands_direct_quoted_expressions_before_validation() {
+        let source = "fn generated(value: Int) -> Int { splice quote { value * 2 + 1 } }";
+        let parsed = parse(source).unwrap();
+        assert!(matches!(
+            parsed.functions[0].body.unlocated(),
+            Expr::Binary {
+                operator: Operator::Add,
+                ..
+            }
+        ));
+        assert_eq!(
+            parsed.functions[0].body.span(),
+            Some(SourceSpan {
+                start: source.find("splice quote").unwrap(),
+                end: source.find("splice quote").unwrap() + "splice quote { value * 2 + 1 }".len(),
+            })
+        );
+    }
+
+    #[test]
+    fn expands_local_code_values_before_validation() {
+        let parsed = parse(
+            "fn generated(value: Int) -> Int { let code = quote { value * 2 }; splice code + 1 }",
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed.functions[0].body.unlocated(),
+            Expr::Binary {
+                operator: Operator::Add,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unconsumed_quotes_and_non_code_splices() {
+        let quote = parse("fn bad() -> Int { quote { 1 } }").unwrap_err();
+        assert!(matches!(quote, Error::QuoteOutsideSplice { .. }));
+
+        let splice = parse("fn bad() -> Int { splice 1 }").unwrap_err();
+        assert!(matches!(splice, Error::InvalidSplice { .. }));
     }
 
     #[test]
@@ -3453,7 +3718,7 @@ comptime jsonEncode(User)"#;
     }
 
     #[test]
-    fn json_supports_explicit_comptime_calls() {
+    fn json_derives_do_not_attach_comptime_implementation_functions() {
         let program = parse(
             "struct User { name: String }
              comptime jsonEncode(User)
@@ -3474,10 +3739,10 @@ comptime jsonEncode(User)"#;
             }
         );
         assert!(
-            program
+            !program
                 .functions
                 .iter()
-                .any(|function| function.name == "_oche_generate_json_encode")
+                .any(|function| function.name.starts_with("_oche_generate_json_"))
         );
 
         assert!(parse("#[derive(Json)] struct User { name: String }").is_err());

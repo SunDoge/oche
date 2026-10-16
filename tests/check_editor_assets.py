@@ -32,6 +32,8 @@ for token in (
     "try",
     "import",
     "dart",
+    "splice",
+    "quote",
     "Option",
     "Result",
 ):
@@ -61,6 +63,8 @@ for token in (
     "try",
     "import",
     "dart",
+    "splice",
+    "quote",
     "Option",
     "Result",
 ):

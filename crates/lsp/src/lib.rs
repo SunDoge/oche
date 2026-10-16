@@ -348,6 +348,8 @@ impl<R: Read, W: Write> Server<R, W> {
             "Result" => "Tagged success or failure value: Ok(T) or Err(E).",
             "comptime" => "Evaluate this expression or declaration during compilation.",
             "const" => "Mark a function as eligible for compile-time evaluation.",
+            "splice" => "Insert a directly quoted expression before type checking.",
+            "quote" => "Build a compile-time expression for direct or local 'splice' use.",
             "match" => "Pattern-matching expression.",
             "if" => "Restrict a match arm with a Bool guard.",
             "enum" => "A tagged union lowered to a sealed Dart class family.",

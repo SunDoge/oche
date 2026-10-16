@@ -47,7 +47,7 @@
 ] @keyword
 
 ((identifier) @keyword
-  (#any-of? @keyword "comptime" "const" "dart" "import" "mut" "test"))
+  (#any-of? @keyword "comptime" "const" "dart" "import" "mut" "test" "splice" "quote"))
 
 [
   "->"
